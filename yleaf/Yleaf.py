@@ -45,7 +45,6 @@ ACCEPTED_REF_BASES: Set[str] = {"A", "C", "G", "T"}
 PREDICTION_OUT_FILE_NAME: str = "hg_prediction.hg"
 HAPLOGROUP_IMAGE_FILE_NAME: str = "hg_tree_image"
 
-
 LOG: logging.Logger = logging.getLogger("yleaf_logger")
 
 
@@ -53,6 +52,7 @@ class MyFormatter(logging.Formatter):
     """
     Copied from MultiGeneBlast (my code)
     """
+
     def __init__(self, fmt, starttime=time.time()):
         logging.Formatter.__init__(self, fmt)
         self._start_time = starttime
@@ -68,8 +68,296 @@ class MyFormatter(logging.Formatter):
         return super(MyFormatter, self).format(record)
 
 
-def main():
+def run_vcf(
+        path_markerfile: Path,
+        base_out_folder: Path,
+        args: argparse.Namespace,
+        sample_vcf_file: Path,
+):
+    LOG.debug("Starting with extracting haplogroups...")
+    markerfile = pd.read_csv(path_markerfile, header=None, sep="\t",
+                             names=["chr", "marker_name", "haplogroup", "pos", "mutation", "anc",
+                                    "der"],
+                             dtype={"chr": str,
+                                    "marker_name": str,
+                                    "haplogroup": str,
+                                    "pos": int,
+                                    "mutation": str,
+                                    "anc": str,
+                                    "der": str,
+                                    }).drop_duplicates(subset='pos', keep='first', inplace=False)
 
+    sample_vcf_folder = base_out_folder / (sample_vcf_file.name.replace(".vcf.gz", ""))
+    safe_create_dir(sample_vcf_folder, args.force)
+
+    sample_vcf_file_txt = sample_vcf_folder / (sample_vcf_file.name.replace(".vcf.gz", ".txt"))
+    cmd = f"bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n' {sample_vcf_file} > {sample_vcf_file_txt}"
+    call_command(cmd)
+
+    pileupfile = pd.read_csv(sample_vcf_file_txt,
+                             dtype=str, header=None, sep="\t")
+
+    # remove sample_vcf_file_txt
+    cmd = f"rm {sample_vcf_file_txt}"
+    call_command(cmd)
+
+    pileupfile.columns = ['chr', 'pos', 'refbase', 'altbase', 'reads']
+    pileupfile['pos'] = pileupfile['pos'].astype(int)
+
+    pileupfile['altbase'] = pileupfile['altbase'].str.split(',')
+    pileupfile['reads'] = pileupfile['reads'].str.split(',')
+
+    pileupfile['ref_reads'] = pileupfile['reads'].apply(lambda x: x[0])
+    pileupfile['alt_reads'] = pileupfile['reads'].apply(lambda x: x[1:])
+
+    pileupfile['alt_reads_dict'] = pileupfile.apply(lambda row: dict(zip(row['altbase'], row['alt_reads'])), axis=1)
+    pileupfile['alt_reads_dict'] = pileupfile['alt_reads_dict'].apply(lambda x: {k: int(v) for k, v in x.items()})
+    pileupfile['highest_alt_reads'] = pileupfile['alt_reads_dict'].apply(lambda x: max(x.values()) if len(x) > 0 else 0)
+    pileupfile['highest_alt_reads_base'] = pileupfile['alt_reads_dict'].apply(
+        lambda x: max(x, key=x.get) if len(x) > 0 else 'NA')
+    pileupfile['total_reads'] = pileupfile.apply(lambda row: int(row['ref_reads']) + row['highest_alt_reads'], axis=1)
+    pileupfile['called_ref_perc'] = pileupfile.apply(
+        lambda row: round((int(row['ref_reads']) / row['total_reads']) * 100, 1) if row['total_reads'] > 0 else 0,
+        axis=1)
+    pileupfile['called_alt_perc'] = pileupfile.apply(
+        lambda row: round((row['highest_alt_reads'] / row['total_reads']) * 100, 1) if row['total_reads'] > 0 else 0,
+        axis=1)
+
+    pileupfile['called_base'] = pileupfile.apply(
+        lambda row: row['refbase'] if row['called_ref_perc'] >= row['called_alt_perc'] else row[
+            'highest_alt_reads_base'], axis=1)
+    pileupfile['called_perc'] = pileupfile.apply(
+        lambda row: row['called_ref_perc'] if row['called_ref_perc'] >= row['called_alt_perc'] else row[
+            'called_alt_perc'], axis=1).astype(float)
+    pileupfile['called_reads'] = pileupfile.apply(
+        lambda row: row['ref_reads'] if row['called_ref_perc'] >= row['called_alt_perc'] else row['highest_alt_reads'],
+        axis=1).astype(int)
+
+    intersect_pos = np.intersect1d(pileupfile['pos'], markerfile['pos'])
+    markerfile = markerfile.loc[markerfile['pos'].isin(intersect_pos)]
+    markerfile = markerfile.sort_values(by=['pos'])
+    pileupfile = pileupfile.loc[pileupfile['pos'].isin(intersect_pos)]
+
+    pileupfile = pileupfile.drop(['chr'], axis=1)
+    df = pd.merge(markerfile, pileupfile, on='pos')
+
+    df['state'] = df.apply(
+        lambda row: 'A' if row['called_base'] == row['anc'] else 'D' if row['called_base'] == row['der'] else 'NA',
+        axis=1)
+    df['bool_state'] = df.apply(
+        lambda row: True if (row['called_base'] == row['anc'] or row['called_base'] == row['der']) else False, axis=1)
+
+    markerfile_len = len(markerfile)
+
+    # valid markers from positionsfile.txt
+    general_info_list = ["Total of mapped reads: VCF", "Total of unmapped reads: VCF"]
+    general_info_list += ["Valid markers: " + str(markerfile_len)]
+
+    index_belowzero = df[df["called_reads"] == 0].index
+    df_belowzero = df[df.index.isin(index_belowzero)]
+    df_belowzero = df_belowzero.drop(['refbase', 'altbase'], axis=1)
+    df_belowzero["called_perc"] = "NA"
+    df_belowzero["called_base"] = "NA"
+    df_belowzero["state"] = "NA"
+    df_belowzero["Description"] = "Position with zero reads"
+
+    df = df[~df.index.isin(index_belowzero)]
+    bool_list_state = df[df["bool_state"] == False].index
+
+    # discordant genotypes
+    df_discordantgenotype = df[df.index.isin(bool_list_state)]
+    df_discordantgenotype = df_discordantgenotype.drop(["bool_state"], axis=1)
+    df_discordantgenotype["state"] = "NA"
+    df_discordantgenotype["Description"] = "Discordant genotype"
+    df = df[~df.index.isin(bool_list_state)]
+
+    reads_thresh = int(args.reads_treshold)
+
+    # read threshold
+    df_readsthreshold = df[df["called_reads"] < reads_thresh]
+    df_readsthreshold["Description"] = "Below read threshold"
+    df = df[df["called_reads"] >= reads_thresh]
+
+    base_majority = float(args.base_majority)
+
+    # filter by base percentage
+    df_basemajority = df[df["called_perc"] < base_majority]
+    df_basemajority["Description"] = "Below base majority"
+    df = df[df["called_perc"] >= base_majority]
+
+    df_fmf = pd.concat([df_belowzero, df_readsthreshold, df_basemajority, df_discordantgenotype], axis=0, sort=True)
+    df_fmf['reads'] = df_fmf['called_reads']
+    df_fmf = df_fmf[['chr', 'pos', 'marker_name', 'haplogroup', 'mutation', 'anc', 'der', 'reads',
+                     'called_perc', 'called_base', 'state', 'Description']]
+
+    df_out = df
+    df_out['reads'] = df_out['called_reads']
+    df_out = df_out[['chr', 'pos', 'marker_name', 'haplogroup', 'mutation', 'anc', 'der', 'reads',
+                     'called_perc', 'called_base', 'state']]
+
+    general_info_list.append("Markers with zero reads: " + str(len(df_belowzero)))
+    general_info_list.append(
+        "Markers below the read threshold {" + str(reads_thresh) + "}: " + str(len(df_readsthreshold)))
+    general_info_list.append(
+        "Markers below the base majority threshold {" + str(base_majority) + "}: " + str(len(df_basemajority)))
+    general_info_list.append("Markers with discordant genotype: " + str(len(df_discordantgenotype)))
+    general_info_list.append("Markers without haplogroup information: " + str(len(df_fmf)))
+    general_info_list.append("Markers with haplogroup information: " + str(len(df_out)))
+
+    write_info_file(sample_vcf_folder, general_info_list)
+
+    use_old = args.use_old
+    outputfile = sample_vcf_folder / (sample_vcf_file.name.replace(".vcf.gz", ".out"))
+    fmf_output = sample_vcf_folder / (sample_vcf_file.name.replace(".vcf.gz", ".fmf"))
+
+    if use_old:
+        df_out = df_out.sort_values(by=['haplogroup'], ascending=True)
+        df_out = df_out[
+            ["chr", "pos", "marker_name", "haplogroup", "mutation", "anc", "der", "reads", "called_perc",
+             "called_base",
+             "state"]]
+        df_fmf.to_csv(fmf_output, sep="\t", index=False)
+        df_out.to_csv(outputfile, sep="\t", index=False)
+        return
+
+    df_out = df_out[
+        ["chr", "pos", "marker_name", "haplogroup", "mutation", "anc", "der", "reads", "called_perc", "called_base",
+         "state"]]
+    df_fmf.to_csv(fmf_output, sep="\t", index=False)
+
+    # sort based on the tree
+    lst_df = df_out.values.tolist()
+    mappable_df = {}
+    for lst in lst_df:
+        if lst[3] not in mappable_df:
+            mappable_df[lst[3]] = []
+        mappable_df[lst[3]].append(lst)
+
+    tree = Tree(yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER / yleaf_constants.TREE_FILE)
+    with open(outputfile, "w") as f:
+        f.write('\t'.join(["chr", "pos", "marker_name", "haplogroup", "mutation", "anc", "der", "reads",
+                           "called_perc", "called_base", "state", "depth\n"]))
+        for node_key in tree.node_mapping:
+            if node_key not in mappable_df:
+                continue
+            depth = tree.get(node_key).depth
+            for lst in mappable_df[node_key]:
+                f.write('\t'.join(map(str, lst)) + f"\t{depth}\n")
+
+    LOG.info(f"Finished extracting genotypes for {sample_vcf_file.name}")
+
+
+def main_vcf_split(
+        position_bed_file: Path,
+        base_out_folder: Path,
+        args: argparse.Namespace,
+        vcf_file: Path
+):
+    # first sort the vcf file
+    sorted_vcf_file = base_out_folder / (vcf_file.name.replace(".vcf.gz", ".sorted.vcf.gz"))
+    cmd = f"bcftools sort -O z -o {sorted_vcf_file} {vcf_file}"
+    try:
+        call_command(cmd)
+    except SystemExit:
+        LOG.error(f"Failed to sort the vcf file {vcf_file.name}. Skipping...")
+        return None
+
+    # next index the vcf file
+    cmd = f"bcftools index -f {sorted_vcf_file}"
+    call_command(cmd)
+
+    # get chromosome annotation using bcftools query -f '%CHROM\n' sorted.vcf.gz | uniq
+    cmd = f"bcftools query -f '%CHROM\n' {sorted_vcf_file} | uniq"
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        LOG.error(f"Call: '{cmd}' failed. Reason given: '{stderr.decode('utf-8')}'")
+        raise SystemExit("Failed command execution")
+    chromosomes = stdout.decode('utf-8').strip().split("\n")
+    chry = [x for x in chromosomes if "y" in x.lower()]
+    if len(chry) == 0:
+        LOG.error("Unable to find Y-chromosome in the vcf file. Exiting...")
+        raise SystemExit("Unable to find Y-chromosome in the vcf file.")
+    elif len(chry) > 1:
+        LOG.error("Multiple Y-chromosome annotations found in the vcf file. Exiting...")
+        raise SystemExit("Multiple Y-chromosome annotations found in the vcf file.")
+    else:
+        # make new position_bed_file with correct chrY annotation
+        new_position_bed_file = base_out_folder / (vcf_file.name.replace(".vcf.gz", "temp_position_bed.bed"))
+        with open(position_bed_file, "r") as f:
+            with open(new_position_bed_file, "w") as f2:
+                for line in f:
+                    line = line.replace("chrY", chry[0])
+                    f2.write(line)
+
+    # filter the vcf file using the reference bed file
+    filtered_vcf_file = base_out_folder / "filtered_vcf_files" / (
+        sorted_vcf_file.name.replace(".sorted.vcf.gz", ".filtered.vcf.gz"))
+    cmd = f"bcftools view -O z -R {new_position_bed_file} {sorted_vcf_file} > {filtered_vcf_file}"
+    call_command(cmd)
+
+    # remover temp_position_bed.bed
+    cmd = f"rm {new_position_bed_file}"
+    call_command(cmd)
+
+    # remove sorted.vcf.gz and sorted.vcf.gz.csi
+    cmd = f"rm {sorted_vcf_file}"
+    call_command(cmd)
+    cmd = f"rm {sorted_vcf_file}.csi"
+    call_command(cmd)
+
+    # check number of samples in the vcf file
+    cmd = f"bcftools query -l {filtered_vcf_file} | wc -l"
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        LOG.error(f"Call: '{cmd}' failed. Reason given: '{stderr.decode('utf-8')}'")
+        raise SystemExit("Failed command execution")
+    num_samples = int(stdout.decode('utf-8').strip())
+
+    if num_samples > 1:
+        # split the vcf file into separate files for each sample
+        split_vcf_folder = base_out_folder / (vcf_file.name.replace(".vcf.gz", "_split"))
+        safe_create_dir(split_vcf_folder, args.force)
+        cmd = f"bcftools +split {filtered_vcf_file} -Oz -o {split_vcf_folder}"
+        call_command(cmd)
+        sample_vcf_files = get_files_with_extension(split_vcf_folder, '.vcf.gz')
+    elif num_samples == 1:
+        sample_vcf_files = [filtered_vcf_file]
+    else:
+        LOG.error("No samples found in the vcf file. Exiting...")
+        raise SystemExit("No samples found in the vcf file.")
+
+    return sample_vcf_files
+
+
+def main_vcf(
+        args: argparse.Namespace,
+        base_out_folder: Path
+):
+    position_bed_file = get_position_bed_file(args.reference_genome, args.use_old, args.ancient_DNA)
+    path_markerfile = get_position_file(args.reference_genome, args.use_old, args.ancient_DNA)
+
+    safe_create_dir(base_out_folder / "filtered_vcf_files", args.force)
+
+    files = get_files_with_extension(args.vcffile, '.vcf.gz')
+
+    if not args.reanalyze:
+        with multiprocessing.Pool(processes=args.threads) as p:
+            sample_vcf_files = p.map(partial(main_vcf_split, position_bed_file, base_out_folder, args), files)
+
+        sample_vcf_files = [x for x in sample_vcf_files if x is not None]
+        sample_vcf_files = [item for sublist in sample_vcf_files for item in sublist]
+
+        with multiprocessing.Pool(processes=args.threads) as p:
+            p.map(partial(run_vcf, path_markerfile, base_out_folder, args), sample_vcf_files)
+
+    else:
+        with multiprocessing.Pool(processes=args.threads) as p:
+            p.map(partial(run_vcf, path_markerfile, base_out_folder, args), files)
+
+
+def main():
     print("Erasmus MC Department of Genetic Identification\nYleaf: software tool for human Y-chromosomal "
           f"phylogenetic analysis and haplogroup inference v{__version__}")
     logo()
@@ -90,11 +378,13 @@ def main():
         main_bam_cram(args, out_folder, True)
     elif args.cramfile:
         main_bam_cram(args, out_folder, False)
+    elif args.vcffile:
+        main_vcf(args, out_folder)
     else:
-        LOG.error("Please specify either a bam, a cram or a fastq file")
-        raise ValueError("Please specify either a bam, a cram or a fastq file")
+        LOG.error("Please specify either a bam, a cram, a fastq, or a vcf file")
+        raise ValueError("Please specify either a bam, a cram, a fastq, or a vcf file")
     hg_out = out_folder / PREDICTION_OUT_FILE_NAME
-    predict_haplogroup(out_folder, hg_out, args.use_old)
+    predict_haplogroup(out_folder, hg_out, args.use_old, args.prediction_quality, args.threads)
     if args.draw_haplogroups:
         draw_haplogroups(hg_out, args.collapsed_draw_mode)
 
@@ -125,6 +415,13 @@ def get_arguments() -> argparse.Namespace:
                         help="input BAM file", metavar="PATH", type=check_file)
     parser.add_argument("-cram", "--cramfile", required=False,
                         help="input CRAM file", metavar="PATH", type=check_file)
+    parser.add_argument("-cr", "--cram_reference", required=False,
+                        help="Reference genome for the CRAM file. Required when using CRAM files.",
+                        metavar="PATH", type=check_file)
+    parser.add_argument("-vcf", "--vcffile", required=False,
+                        help="input VCF file (.vcf.gz)", metavar="PATH", type=check_file)
+    parser.add_argument("-ra", "--reanalyze", required=False,
+                        help="reanalyze (skip filtering and splitting) the vcf file", action="store_true")
     parser.add_argument("-force", "--force", action="store_true",
                         help="Delete files without asking")
     parser.add_argument("-rg", "--reference_genome",
@@ -149,6 +446,8 @@ def get_arguments() -> argparse.Namespace:
     parser.add_argument("-t", "--threads", dest="threads",
                         help="The number of processes to use when running Yleaf.",
                         type=int, default=1, metavar="INT")
+    parser.add_argument("-pq", "--prediction_quality", type=float, required=False, default=0.95, metavar="FLOAT",
+                        help="The minimum quality of the prediction (QC-scores) for it to be accepted. [0-1] (default=0.95)")
 
     # arguments for prediction
     parser.add_argument("-old", "--use_old", dest="use_old",
@@ -162,6 +461,11 @@ def get_arguments() -> argparse.Namespace:
     parser.add_argument("-hc", "--collapsed_draw_mode",
                         help="Add this flag to compress the haplogroup tree image and remove all uninformative "
                              "haplogroups from it.", action="store_true")
+
+    # arguments for ancient DNA samples
+    parser.add_argument("-aDNA", "--ancient_DNA",
+                        help="Add this flag if the sample is ancient DNA. This will ignore all G > A and C > T mutations.",
+                        action="store_true")
 
     # arguments for private mutations
     parser.add_argument("-p", "--private_mutations",
@@ -180,7 +484,7 @@ def get_arguments() -> argparse.Namespace:
 
 
 def check_file(
-    path: str
+        path: str
 ) -> Path:
     """Check for the presence of a file and return a Path object"""
     object_path = Path(path)
@@ -190,7 +494,7 @@ def check_file(
 
 
 def setup_logger(
-    out_folder: Path
+        out_folder: Path
 ):
     """Setup logging"""
     LOG.setLevel(logging.DEBUG)
@@ -211,8 +515,8 @@ def setup_logger(
 
 
 def safe_create_dir(
-    folder: Path,
-    force: bool
+        folder: Path,
+        force: bool
 ):
     """Create the given folder. If the folder is already present delete if the user agrees."""
     if folder.is_dir():
@@ -236,10 +540,11 @@ def safe_create_dir(
 
 
 def main_fastq(
-    args: argparse.Namespace,
-    out_folder: Path
+        args: argparse.Namespace,
+        out_folder: Path
 ):
     files = get_files_with_extension(args.fastq, '.fastq')
+    files += get_files_with_extension(args.fastq, '.fastq.gz')
     reference = get_reference_path(args.reference_genome, True)
     bam_folder = out_folder / yleaf_constants.FASTQ_BAM_FILE_FOLDER
     try:
@@ -247,39 +552,63 @@ def main_fastq(
     except IOError:
         pass
     LOG.info("Creating bam files from fastq files...")
-    for fastq_file in files:
-        LOG.info(f"Starting with running for {fastq_file}")
-        sam_file = bam_folder / "temp_fastq_sam.sam"
 
-        fastq_cmd = f"minimap2 -ax sr -t {args.threads} {reference} {fastq_file} > {sam_file}"
-        call_command(fastq_cmd)
-        bam_file = bam_folder / (fastq_file.name.rsplit(".", 1)[0] + ".bam")
-        cmd = "samtools view -@ {} -bS {} | samtools sort -@ {} -m 2G -o {}".format(args.threads, sam_file,
-                                                                                    args.threads, bam_file)
-        call_command(cmd)
-        cmd = "samtools index -@ {} {}".format(args.threads, bam_file)
-        call_command(cmd)
-        os.remove(sam_file)
+    # For paired end fastq files (with _R1 and _R2 in the file name) and gzipped fastq files with .gz extension align the pairs together
+    for fastq_file in files:
+        if "_R1" in str(fastq_file) and Path(str(fastq_file).replace("_R1", "_R2")).exists():
+            fastq_file2 = Path(str(fastq_file).replace("_R1", "_R2"))
+            LOG.info(f"Starting with running for {fastq_file} and {fastq_file2}")
+            sam_file = bam_folder / "temp_fastq_sam.sam"
+            fastq_cmd = f"minimap2 -ax sr -k14 -w7 -t {args.threads} {reference} {fastq_file} {fastq_file2} > {sam_file}"
+            call_command(fastq_cmd)
+            bam_file = bam_folder / (fastq_file.name.rsplit("_R1", 1)[0] + ".bam")
+            cmd = "samtools view -@ {} -bS {} | samtools sort -@ {} -m 2G -o {}".format(args.threads, sam_file,
+                                                                                        args.threads, bam_file)
+            call_command(cmd)
+            cmd = "samtools index -@ {} {}".format(args.threads, bam_file)
+            call_command(cmd)
+            os.remove(sam_file)
+        elif "_R1" not in str(fastq_file) and "_R2" not in str(fastq_file) and ".gz" in str(fastq_file):
+            LOG.info(f"Starting with running for {fastq_file}")
+            sam_file = bam_folder / "temp_fastq_sam.sam"
+
+            fastq_cmd = f"minimap2 -ax sr -k14 -w7 -t {args.threads} {reference} {fastq_file} > {sam_file}"
+            call_command(fastq_cmd)
+            bam_file = bam_folder / (fastq_file.name.rsplit(".", 1)[0] + ".bam")
+            cmd = "samtools view -@ {} -bS {} | samtools sort -@ {} -m 2G -o {}".format(args.threads, sam_file,
+                                                                                        args.threads, bam_file)
+            call_command(cmd)
+            cmd = "samtools index -@ {} {}".format(args.threads, bam_file)
+            call_command(cmd)
+            os.remove(sam_file)
     args.bamfile = bam_folder
     main_bam_cram(args, out_folder, True)
 
 
 def main_bam_cram(
-    args: argparse.Namespace,
-    base_out_folder: Path,
-    is_bam: bool
+        args: argparse.Namespace,
+        base_out_folder: Path,
+        is_bam: bool
 ):
-    files = get_files_with_extension(args.bamfile, '.bam')
+    if args.bamfile is not None:
+        files = get_files_with_extension(args.bamfile, '.bam')
+    elif args.cramfile is not None:
+        if args.cram_reference is None:
+            raise ValueError("Please specify a reference genome for the CRAM file.")
+        files = get_files_with_extension(args.cramfile, '.cram')
+    else:
+        print("Please specify either (a) bam or a cram file(s)")
+        return
 
     with multiprocessing.Pool(processes=args.threads) as p:
         p.map(partial(run_bam_cram, args, base_out_folder, is_bam), files)
 
 
 def run_bam_cram(
-    args: argparse.Namespace,
-    base_out_folder: Path,
-    is_bam: bool,
-    input_file: Path
+        args: argparse.Namespace,
+        base_out_folder: Path,
+        is_bam: bool,
+        input_file: Path
 ):
     LOG.info(f"Starting with running for {input_file}")
     output_dir = base_out_folder / input_file.name.rsplit(".", 1)[0]
@@ -293,8 +622,8 @@ def run_bam_cram(
 
 
 def call_command(
-    command_str: str,
-    stdout_location: TextIO = None
+        command_str: str,
+        stdout_location: TextIO = None
 ):
     """Call a command on the command line and make sure to exit if it fails."""
     LOG.debug(f"Started running the following command: {command_str}")
@@ -308,19 +637,19 @@ def call_command(
     if process.returncode != 0:
         LOG.error(f"Call: '{command_str}' failed. Reason given: '{stderr.decode('utf-8')}'")
         raise SystemExit("Failed command execution")
-    LOG.debug("Finished running the command")
+    LOG.debug(f"Finished running the command {command_str}")
 
 
 def get_files_with_extension(
-    path: Union[str, Path],
-    ext: str
+        path: Union[str, Path],
+        ext: str
 ) -> List[Path]:
     """Get all files with a certain extension from a path. The path can be a file or a dir."""
     filtered_files = []
     path = Path(path)  # to be sure
     if path.is_dir():
         for file in path.iterdir():
-            if file.suffix == ext:
+            if str(file)[-len(ext):] == ext:
                 filtered_files.append(file)
         return filtered_files
     else:
@@ -328,7 +657,7 @@ def get_files_with_extension(
 
 
 def check_reference(
-    requested_version: str,
+        requested_version: str,
 ):
     reference_file = get_reference_path(requested_version, True)
     if os.path.getsize(reference_file) < 100:
@@ -339,8 +668,8 @@ def check_reference(
 
 
 def get_reference_path(
-    requested_version: str,
-    is_full: bool
+        requested_version: str,
+        is_full: bool
 ) -> Union[Path, None]:
     if is_full:
         if requested_version == yleaf_constants.HG19:
@@ -356,16 +685,15 @@ def get_reference_path(
 
 
 def samtools(
-    output_folder: Path,
-    path_file: Path,
-    is_bam_pathfile: bool,
-    args: argparse.Namespace,
+        output_folder: Path,
+        path_file: Path,
+        is_bam_pathfile: bool,
+        args: argparse.Namespace,
 ) -> List[str]:
-
     outputfile = output_folder / (output_folder.name + ".out")
     fmf_output = output_folder / (output_folder.name + ".fmf")
     pileupfile = output_folder / "temp_haplogroup_pileup.pu"
-    reference = get_reference_path(args.reference_genome, True) if not is_bam_pathfile else None
+    reference = args.cram_reference if not is_bam_pathfile else None
 
     if is_bam_pathfile:
         if not any([Path(str(path_file) + ".bai").exists(), Path(str(path_file).rstrip(".bam") + '.bai').exists()]):
@@ -377,7 +705,7 @@ def samtools(
             call_command(cmd)
     header, mapped, unmapped = chromosome_table(path_file, output_folder, output_folder.name)
 
-    position_file = get_position_file(args.reference_genome, args.use_old)
+    position_file = get_position_file(args.reference_genome, args.use_old, args.ancient_DNA)
 
     bed = output_folder / "temp_position_bed.bed"
     write_bed_file(bed, position_file, header)
@@ -397,9 +725,9 @@ def samtools(
 
 
 def chromosome_table(
-    path_file: Path,
-    path_folder: Path,
-    file_name: str
+        path_file: Path,
+        path_folder: Path,
+        file_name: str
 ) -> Tuple[str, int, int]:
     output = path_folder / (file_name + '.chr')
     tmp_output = path_folder / "tmp.txt"
@@ -432,20 +760,45 @@ def chromosome_table(
 
 
 def get_position_file(
-    reference_name: str,
-    use_old: bool
+        reference_name: str,
+        use_old: bool,
+        ancient_DNA: bool,
 ) -> Path:
     if use_old:
-        position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.OLD_POSITION_FILE
+        if ancient_DNA:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.OLD_POSITION_ANCIENT_FILE
+        else:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.OLD_POSITION_FILE
     else:
-        position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.NEW_POSITION_FILE
+        if ancient_DNA:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.NEW_POSITION_ANCIENT_FILE
+        else:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.NEW_POSITION_FILE
+    return position_file
+
+
+def get_position_bed_file(
+        reference_name: str,
+        use_old: bool,
+        ancient_DNA: bool,
+) -> Path:
+    if use_old:
+        if ancient_DNA:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.OLD_POSITION_ANCIENT_BED_FILE
+        else:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.OLD_POSITION_BED_FILE
+    else:
+        if ancient_DNA:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.NEW_POSITION_ANCIENT_BED_FILE
+        else:
+            position_file = yleaf_constants.DATA_FOLDER / reference_name / yleaf_constants.NEW_POSITION_BED_FILE
     return position_file
 
 
 def write_bed_file(
-    bed: Path,
-    markerfile: Path,
-    header: str
+        bed: Path,
+        markerfile: Path,
+        header: str
 ):
     mf = pd.read_csv(markerfile, sep="\t", header=None)
     mf = mf[[0, 3]]
@@ -454,11 +807,11 @@ def write_bed_file(
 
 
 def execute_mpileup(
-    bed: Union[Path, None],
-    bam_file: Path,
-    pileupfile: Path,
-    quality_thresh: float,
-    reference: Union[Path, None]
+        bed: Union[Path, None],
+        bam_file: Path,
+        pileupfile: Path,
+        quality_thresh: float,
+        reference: Union[Path, None]
 ):
     cmd = "samtools mpileup"
     if bed is not None:
@@ -471,15 +824,15 @@ def execute_mpileup(
 
 
 def extract_haplogroups(
-    path_markerfile: Path,
-    reads_thresh: float,
-    base_majority: int,
-    path_pileupfile: Path,
-    fmf_output: Path,
-    outputfile: Path,
-    is_bam_file: bool,
-    use_old: bool,
-    general_info_list: List[str]
+        path_markerfile: Path,
+        reads_thresh: float,
+        base_majority: int,
+        path_pileupfile: Path,
+        fmf_output: Path,
+        outputfile: Path,
+        is_bam_file: bool,
+        use_old: bool,
+        general_info_list: List[str]
 ):
     LOG.debug("Starting with extracting haplogroups...")
     markerfile = pd.read_csv(path_markerfile, header=None, sep="\t")
@@ -621,14 +974,14 @@ def extract_haplogroups(
 
 
 def replace_with_bases(
-    base: str,
-    read_result: str
+        base: str,
+        read_result: str
 ) -> str:
     return read_result.replace(",", base[0]).replace(".", base[0])
 
 
 def get_frequency_table(
-    mpileup: List[str]
+        mpileup: List[str]
 ) -> Dict[str, List[int]]:
     frequency_table = {}
     for i in mpileup:
@@ -638,7 +991,7 @@ def get_frequency_table(
 
 
 def get_frequencies(
-    sequence: str
+        sequence: str
 ) -> Dict[str, int]:
     fastadict = {"A": 0, "T": 0, "G": 0, "C": 0, "-": 0, "+": 0, "*": 0}
     sequence = sequence.upper()
@@ -662,8 +1015,8 @@ def get_frequencies(
 
 
 def find_digit(
-    sequence: str,
-    index: int
+        sequence: str,
+        index: int
 ) -> Tuple[int, int]:
     # first is always a digit
     nr = [sequence[index]]
@@ -679,8 +1032,8 @@ def find_digit(
 
 
 def write_info_file(
-    folder: Path,
-    general_info_list: List[str]
+        folder: Path,
+        general_info_list: List[str]
 ):
     try:
         with open(folder / (folder.name + ".info"), "a") as f:
@@ -692,10 +1045,10 @@ def write_info_file(
 
 
 def find_private_mutations(
-    output_folder: Path,
-    path_file: Path,
-    args: argparse.Namespace,
-    is_bam: bool
+        output_folder: Path,
+        path_file: Path,
+        args: argparse.Namespace,
+        is_bam: bool
 ):
     # identify mutations not part of haplogroups that are annotated in dbsnp or differ from the reference genome
     LOG.debug("Starting with extracting private mutations...")
@@ -708,7 +1061,7 @@ def find_private_mutations(
 
     LOG.debug("Loading reference files")
 
-    position_file = get_position_file(args.reference_genome, args.use_old)
+    position_file = get_position_file(args.reference_genome, args.use_old, args.ancient_DNA)
     filter_positions = load_filter_data(position_file)
     known_snps = load_snp_database_file(snp_database_file, args.minor_allele_frequency)
     ychrom_reference = load_reference_file(snp_reference_file)
@@ -778,7 +1131,7 @@ def find_private_mutations(
 
 
 def load_filter_data(
-    path: Path
+        path: Path
 ) -> Set[str]:
     global CACHED_POSITION_DATA
     if CACHED_POSITION_DATA is None:
@@ -790,8 +1143,8 @@ def load_filter_data(
 
 
 def load_snp_database_file(
-    path: Path,
-    minor_allele_frequency: float
+        path: Path,
+        minor_allele_frequency: float
 ) -> Union[Dict[str, List[Dict[str, str]]], None]:
     global CACHED_SNP_DATABASE
 
@@ -813,7 +1166,7 @@ def load_snp_database_file(
 
 
 def load_reference_file(
-    path: Path
+        path: Path
 ) -> Union[List[str], None]:
     global CACHED_REFERENCE_FILE
     if path is not None:
@@ -830,9 +1183,11 @@ def load_reference_file(
 
 
 def predict_haplogroup(
-    path_file: Path,
-    output: Path,
-    use_old: bool
+        path_file: Path,
+        output: Path,
+        use_old: bool,
+        prediction_quality: float,
+        threads: int,
 ):
     if use_old:
         script = yleaf_constants.SRC_FOLDER / "old_predict_haplogroup.py"
@@ -841,13 +1196,13 @@ def predict_haplogroup(
     else:
         from yleaf import predict_haplogroup
         namespace = argparse.Namespace(input=path_file, outfile=output,
-                                       minimum_score=predict_haplogroup.DEFAULT_MIN_SCORE)
+                                       minimum_score=prediction_quality, threads=threads)
         predict_haplogroup.main(namespace)
 
 
 def draw_haplogroups(
-    haplogroup_file: Path,
-    collapsed_draw_mode: bool
+        haplogroup_file: Path,
+        collapsed_draw_mode: bool
 ):
     # make sure that it is only imported if requested by user
     from yleaf import haplogroup_tree_image
