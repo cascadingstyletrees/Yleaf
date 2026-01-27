@@ -230,7 +230,7 @@ def get_most_likely_haplotype(
         node = tree.get(haplotype_name)
 
         # only record most specific nodes regardless of scores
-        if node in covered_nodes:
+        if node.name in covered_nodes:
             continue
         parent = node.parent
         path = [node.name]
