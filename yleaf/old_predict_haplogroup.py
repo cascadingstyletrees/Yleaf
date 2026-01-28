@@ -278,6 +278,10 @@ def main():
     intermediate_tree_table = hg_intermediate + "/Intermediates.txt"
     h_flag = True
     log_output = []
+
+    df_intermediate_static = pd.read_csv(intermediate_tree_table, header=None, engine='python')
+    intermediates_static = df_intermediate_static[0].values
+
     for sample_name in samples:
         putative_hg = "NA"
         out_name = str(sample_name.split("/")[-1])
@@ -285,8 +289,7 @@ def main():
 
         total_reads, valid_markers = process_log(sample_name[:-3])
 
-        df_intermediate = pd.read_csv(intermediate_tree_table, header=None, engine='python')
-        intermediates = df_intermediate[0].values
+        intermediates = intermediates_static
 
         df_haplogroup_all = pd.read_csv(sample_name, sep="\t", engine='python')
         df_haplogroup_all = df_haplogroup_all.sort_values(by=['haplogroup'])
