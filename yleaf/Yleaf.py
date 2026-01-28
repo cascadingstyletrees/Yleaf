@@ -25,9 +25,10 @@ from functools import partial
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Union, List, TextIO, Tuple, Dict, Set
-from collections import defaultdict
+from collections import defaultdict, Counter
 import time
 import datetime
+import re
 
 from yleaf import __version__
 from yleaf.tree import Tree
@@ -38,8 +39,10 @@ pd.options.mode.chained_assignment = None  # default='warn'
 CACHED_POSITION_DATA: Union[Set[str], None] = None
 CACHED_SNP_DATABASE: Union[Dict[str, List[Dict[str, str]]], None] = None
 CACHED_REFERENCE_FILE: Union[str, None] = None
-NUM_SET: Set[str] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
 ACCEPTED_REF_BASES: Set[str] = {"A", "C", "G", "T"}
+
+START_RE = re.compile(r'\^.')
+INDEL_RE = re.compile(r'([+-])(\d+)')
 
 # path constants
 PREDICTION_OUT_FILE_NAME: str = "hg_prediction.hg"
@@ -993,42 +996,58 @@ def get_frequency_table(
 def get_frequencies(
         sequence: str
 ) -> Dict[str, int]:
-    fastadict = {"A": 0, "T": 0, "G": 0, "C": 0, "-": 0, "+": 0, "*": 0}
     sequence = sequence.upper()
-    index = 0
-    while index < len(sequence):
-        char = sequence[index]
-        if char in fastadict:
-            fastadict[char] += 1
-            index += 1
-        elif char == "^":
-            index += 2
-        elif char in {"-", "+"}:
-            index += 1
-            digit, index = find_digit(sequence, index)
-            index += digit
-        else:
-            index += 1
-    fastadict["-"] += fastadict["*"]
-    del fastadict["*"]
-    return fastadict
 
+    # 1. Remove start markers "^."
+    sequence = START_RE.sub('', sequence)
 
-def find_digit(
-        sequence: str,
-        index: int
-) -> Tuple[int, int]:
-    # first is always a digit
-    nr = [sequence[index]]
-    index += 1
-    while True:
-        char = sequence[index]
-        # this seems to be faster than isdigit()
-        if char in NUM_SET:
-            nr.append(char)
-            index += 1
-            continue
-        return int(''.join(nr)), index
+    # 2. Remove end markers "$"
+    sequence = sequence.replace('$', '')
+
+    # 3. Handle Indels
+    indel_counts = {'+': 0, '-': 0}
+
+    clean_parts = []
+    last_pos = 0
+
+    # We assume pileup indel sequences (AGCTN*) do not contain + or - followed by digits.
+    for match in INDEL_RE.finditer(sequence):
+        start, end = match.span()
+
+        # Keep the part before the indel
+        if start > last_pos:
+            clean_parts.append(sequence[last_pos:start])
+
+        # Count the indel
+        indel_type = match.group(1)
+        indel_counts[indel_type] += 1
+
+        # Get length to skip
+        skip_len = int(match.group(2))
+
+        # Advance last_pos over the match AND the skipped sequence
+        last_pos = end + skip_len
+
+    # Append remaining part
+    if last_pos < len(sequence):
+        clean_parts.append(sequence[last_pos:])
+
+    final_seq = "".join(clean_parts)
+
+    # 4. Count bases
+    # We only care about A, T, G, C, *, and we map * to -
+    c = Counter(final_seq)
+
+    result = {
+        "A": c["A"],
+        "T": c["T"],
+        "G": c["G"],
+        "C": c["C"],
+        "-": c["*"] + indel_counts["-"],
+        "+": indel_counts["+"],
+    }
+
+    return result
 
 
 def write_info_file(
