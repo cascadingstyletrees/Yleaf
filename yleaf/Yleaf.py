@@ -37,7 +37,7 @@ pd.options.mode.chained_assignment = None  # default='warn'
 
 CACHED_POSITION_DATA: Union[Set[str], None] = None
 CACHED_SNP_DATABASE: Union[Dict[str, List[Dict[str, str]]], None] = None
-CACHED_REFERENCE_FILE: Union[List[str], None] = None
+CACHED_REFERENCE_FILE: Union[str, None] = None
 NUM_SET: Set[str] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
 ACCEPTED_REF_BASES: Set[str] = {"A", "C", "G", "T"}
 
@@ -1167,16 +1167,17 @@ def load_snp_database_file(
 
 def load_reference_file(
         path: Path
-) -> Union[List[str], None]:
+) -> Union[str, None]:
     global CACHED_REFERENCE_FILE
     if path is not None:
         if CACHED_REFERENCE_FILE is None:
-            CACHED_REFERENCE_FILE = []
+            parts = []
             with open(path) as f:
                 for line in f:
                     if line.startswith(">"):
                         continue
-                    CACHED_REFERENCE_FILE.extend(line.strip())
+                    parts.append(line.strip())
+            CACHED_REFERENCE_FILE = "".join(parts)
         return CACHED_REFERENCE_FILE
     else:
         return None
