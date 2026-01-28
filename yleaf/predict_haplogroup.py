@@ -81,6 +81,7 @@ class HgMarkersLinker:
 
 def main_predict_haplogroup(
     namespace: argparse.Namespace,
+    tree: Tree,
     folder: Path,
 ):
     # make sure to reset this for each sample
@@ -96,7 +97,6 @@ def main_predict_haplogroup(
         LOG.warning(f"WARNING: failed to find .out file from yleaf run for sample {folder.name}. This sample will"
                     " be skipped.")
         return [None, None, None]
-    tree = Tree(yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER / yleaf_constants.TREE_FILE)
     best_haplotype_score = get_most_likely_haplotype(tree, haplotype_dict, namespace.minimum_score)
     return [haplotype_dict, best_haplotype_score, folder]
 
@@ -112,8 +112,10 @@ def main(namespace: argparse.Namespace = None):
     read_backbone_groups()
     final_table = []
 
+    tree = Tree(yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER / yleaf_constants.TREE_FILE)
+
     with multiprocessing.Pool(processes=threads) as p:
-        predictions = p.map(partial(main_predict_haplogroup, namespace), read_input_folder(in_folder))
+        predictions = p.map(partial(main_predict_haplogroup, namespace, tree), read_input_folder(in_folder))
 
     for haplotype_dict, best_haplotype_score, folder in predictions:
         if haplotype_dict is None:
