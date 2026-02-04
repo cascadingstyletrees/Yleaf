@@ -23,9 +23,10 @@ from typing import Any
 from yleaf import yleaf_constants
 from yleaf.tree import Node, Tree
 
-BACKBONE_GROUPS: set = set()
-MAIN_HAPLO_GROUPS: set = set()
-QC1_SCORE_CACHE: dict[str, float] = {}
+BACKBONE_GROUPS: Set = set()
+MAIN_HAPLO_GROUPS: Set = set()
+QC1_SCORE_CACHE: Dict[str, float] = {}
+EXPECTED_STATES_CACHE: Dict[str, Dict[str, Set[str]]] = {}
 
 DEFAULT_MIN_SCORE = 0.95
 
@@ -421,18 +422,23 @@ def get_qc1_score(path: list[str], haplotype_dict: dict[str, HgMarkersLinker]) -
         return 0
 
     global QC1_SCORE_CACHE
+    global EXPECTED_STATES_CACHE
     # same backbone, same score
     hg_folder = yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER
     if most_specific_backbone in QC1_SCORE_CACHE:
         return QC1_SCORE_CACHE[most_specific_backbone]
     else:
-        expected_states = {}
-        with open(f"{hg_folder}/major_tables/{most_specific_backbone}_int.txt") as f:
-            for line in f:
-                if line == "":
-                    continue
-                name, state = line.strip().split("\t")
-                expected_states[name] = {*state.split("/")}
+        if most_specific_backbone in EXPECTED_STATES_CACHE:
+            expected_states = EXPECTED_STATES_CACHE[most_specific_backbone]
+        else:
+            expected_states = {}
+            with open(f"{hg_folder}/major_tables/{most_specific_backbone}_int.txt") as f:
+                for line in f:
+                    if line == "":
+                        continue
+                    name, state = line.strip().split("\t")
+                    expected_states[name] = {*state.split("/")}
+            EXPECTED_STATES_CACHE[most_specific_backbone] = expected_states
 
     score = [0, 0]  # matching, total
     for name, marker_linker in intermediate_states.items():
