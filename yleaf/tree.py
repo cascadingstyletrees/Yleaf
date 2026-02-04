@@ -11,9 +11,8 @@ A copy of GNU GPL v3 should have been included in this software package in LICEN
 Autor: Bram van Wersch
 """
 
-
 import json
-from typing import TYPE_CHECKING, Dict, List, Union
+from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,21 +20,16 @@ if TYPE_CHECKING:
 
 class Tree:
     """Hold the YFull tree in a quickly acccesible structure"""
+
     __ROOT_KEY: str = 'ROOT (Y-Chromosome "Adam")'
 
-    node_mapping: Dict[str, "Node"]
+    node_mapping: dict[str, "Node"]
 
-    def __init__(
-        self,
-        file: Union["Path", str]
-    ):
+    def __init__(self, file: Union["Path", str]):
         self.node_mapping = {}
         self._construct_tree(file)
 
-    def _construct_tree(
-        self,
-        file: Union["Path", str]
-    ):
+    def _construct_tree(self, file: Union["Path", str]):
         """Construct the tree based on a Json file containing a dictionary keyed on node names with lists of child
         nodes as values"""
         with open(file) as f:
@@ -47,9 +41,7 @@ class Tree:
         self._recursive_read(tree_dict, base_node, 0)
 
     def _recursive_read(
-        self,
-        tree_dict: Dict[str, List[str]],
-        node: "Node", depth: int
+        self, tree_dict: dict[str, list[str]], node: "Node", depth: int
     ):
         """Function for recursively reading a dictionary keyed on node names with child nodes as values"""
         depth += 1
@@ -61,10 +53,7 @@ class Tree:
             self.node_mapping[node_name] = new_node
             self._recursive_read(tree_dict, new_node, depth)
 
-    def get(
-        self,
-        node_name: str
-    ) -> "Node":
+    def get(self, node_name: str) -> "Node":
         """Get a node from the tree based on string name"""
         return self.node_mapping[node_name]
 
@@ -72,10 +61,11 @@ class Tree:
 class Node:
     """Nodes used in the tree in order to make accesing information a bit more clear as well as protect the
     modification of variables trough properties"""
+
     _name: str
     _parent: Union["Node", None]
     _depth: int
-    _children: List[str]
+    _children: list[str]
 
     __slots__ = "_name", "_parent", "_depth", "_children"
 
@@ -84,7 +74,7 @@ class Node:
         name: str,
         parent_node: Union["Node", None],
         depth: int,
-        children: List[str]
+        children: list[str],
     ):
         self._name = name
         self._parent = parent_node
@@ -104,5 +94,5 @@ class Node:
         return self._depth
 
     @property
-    def children(self) -> List[str]:
+    def children(self) -> list[str]:
         return self._children
