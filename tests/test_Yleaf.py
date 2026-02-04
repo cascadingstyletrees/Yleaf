@@ -1,6 +1,7 @@
 import unittest
-from collections import Counter
+
 from yleaf.Yleaf import get_frequencies
+
 
 class TestYleaf(unittest.TestCase):
     def test_basic_counts(self):
@@ -58,7 +59,7 @@ class TestYleaf(unittest.TestCase):
         counts = get_frequencies(seq)
         self.assertEqual(counts["A"], 1)
         self.assertEqual(counts["G"], 1)
-        self.assertEqual(counts["T"], 0) # Should be 0 if skipped correctly
+        self.assertEqual(counts["T"], 0)  # Should be 0 if skipped correctly
         self.assertEqual(counts["+"], 1)
 
     def test_case_sensitivity(self):
@@ -86,5 +87,6 @@ class TestYleaf(unittest.TestCase):
         self.assertEqual(counts["+"], 1)
         self.assertEqual(counts["-"], 1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
