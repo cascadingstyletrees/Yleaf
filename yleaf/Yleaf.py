@@ -97,17 +97,14 @@ def run_vcf(
     sample_vcf_folder = base_out_folder / (sample_vcf_file.name.replace(".vcf.gz", ""))
     safe_create_dir(sample_vcf_folder, args.force)
 
-    sample_vcf_file_txt = sample_vcf_folder / (
-        sample_vcf_file.name.replace(".vcf.gz", ".txt")
-    )
-    cmd = f"bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n' {sample_vcf_file} > {sample_vcf_file_txt}"
-    call_command(cmd)
-
-    pileupfile = pd.read_csv(sample_vcf_file_txt, dtype=str, header=None, sep="\t")
-
-    # remove sample_vcf_file_txt
-    cmd = f"rm {sample_vcf_file_txt}"
-    call_command(cmd)
+    cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n", str(sample_vcf_file)]
+    # Use subprocess to pipe directly to pandas
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=False)
+    pileupfile = pd.read_csv(process.stdout, dtype=str, header=None, sep="\t")
+    process.wait()
+    if process.returncode != 0:
+        LOG.error(f"Call: '{' '.join(cmd)}' failed.")
+        raise SystemExit("Failed command execution")
 
     pileupfile.columns = ["chr", "pos", "refbase", "altbase", "reads"]
     pileupfile["pos"] = pileupfile["pos"].astype(int)

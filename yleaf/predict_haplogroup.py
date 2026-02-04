@@ -23,10 +23,10 @@ from typing import Any
 from yleaf import yleaf_constants
 from yleaf.tree import Node, Tree
 
-BACKBONE_GROUPS: Set = set()
-MAIN_HAPLO_GROUPS: Set = set()
-QC1_SCORE_CACHE: Dict[str, float] = {}
-EXPECTED_STATES_CACHE: Dict[str, Dict[str, Set[str]]] = {}
+BACKBONE_GROUPS: set = set()
+MAIN_HAPLO_GROUPS: set = set()
+QC1_SCORE_CACHE: dict[str, float] = {}
+EXPECTED_STATES_CACHE: dict[str, dict[str, set[str]]] = {}
 
 DEFAULT_MIN_SCORE = 0.95
 
