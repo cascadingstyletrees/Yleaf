@@ -11,22 +11,19 @@ Autor: Diego Montiel Gonzalez
 Extensively modified by: Bram van Wersch
 """
 
-import os
-from pathlib import Path
-import urllib.request
 import gzip
+import logging
+import os
 import shutil
 import urllib.request
-import logging
+from pathlib import Path
 
 from yleaf import yleaf_constants
 
 LOG: logging = logging.getLogger("yleaf_logger")
 
 
-def main(
-    choice: str
-):
+def main(choice: str):
     if choice == yleaf_constants.HG19:
         reference_choice = [yleaf_constants.HG19]
     elif choice == yleaf_constants.HG38:
@@ -39,9 +36,7 @@ def main(
         install_genome_files(dir_name)
 
 
-def install_genome_files(
-    reference_choice: str
-):
+def install_genome_files(reference_choice: str):
     LOG.info(f"Starting with preparing {reference_choice}...")
 
     if reference_choice == yleaf_constants.HG19:
@@ -52,14 +47,16 @@ def install_genome_files(
     ref_gz_file = Path(str(ref_file) + ".gz")
     try:
         if os.path.getsize(ref_file) < 100 and not ref_gz_file.exists():
-
             LOG.debug(f"Downloading the {reference_choice} genome...")
-            urllib.request.urlretrieve(f"http://hgdownload.cse.ucsc.edu/goldenPath/{reference_choice}"
-                                       f"/bigZips/{reference_choice}.fa.gz", ref_gz_file)
+            urllib.request.urlretrieve(
+                f"http://hgdownload.cse.ucsc.edu/goldenPath/{reference_choice}"
+                f"/bigZips/{reference_choice}.fa.gz",
+                ref_gz_file,
+            )
         if os.path.getsize(ref_file) < 100:
             LOG.debug("Unpacking the downloaded archive...")
-            with gzip.open(ref_gz_file, 'rb') as f_in:
-                with open(ref_file, 'wb') as f_out:
+            with gzip.open(ref_gz_file, "rb") as f_in:
+                with open(ref_file, "wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
             os.remove(ref_gz_file)
 
@@ -81,18 +78,14 @@ def install_genome_files(
             raise
 
 
-def get_ychrom_data(
-    full_data_path: Path,
-    yhcrom_file: Path
-):
-    with open(yhcrom_file, "w") as fo:
-        with open(full_data_path) as fi:
-            record = False
-            for line in fi:
-                if line == ">chrY\n":
-                    record = True
-                    fo.write(line)
-                elif record:
-                    if line.startswith(">"):
-                        break
-                    fo.write(line)
+def get_ychrom_data(full_data_path: Path, yhcrom_file: Path):
+    with open(yhcrom_file, "w") as fo, open(full_data_path) as fi:
+        record = False
+        for line in fi:
+            if line == ">chrY\n":
+                record = True
+                fo.write(line)
+            elif record:
+                if line.startswith(">"):
+                    break
+                fo.write(line)

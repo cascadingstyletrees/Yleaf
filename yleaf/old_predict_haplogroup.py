@@ -11,27 +11,41 @@ A copy of GNU GPL v3 should have been included in this software package in LICEN
 Autor: Diego Montiel Gonzalez
 """
 
-import pandas as pd
-import numpy as np
+import argparse
 import collections
 import operator
 import os
-import argparse
 from argparse import ArgumentParser
+
+import numpy as np
+import pandas as pd
 
 from yleaf import yleaf_constants
 
 
 def get_arguments():
-    parser = ArgumentParser(description="Erasmus MC: Genetic Identification\n Y-Haplogroup Prediction")
+    parser = ArgumentParser(
+        description="Erasmus MC: Genetic Identification\n Y-Haplogroup Prediction"
+    )
 
-    parser.add_argument("-input", "--Input",
-                        dest="Input", required=True, type=file_exists,
-                        help="Output file or path produced from Yleaf", metavar="FILE")
+    parser.add_argument(
+        "-input",
+        "--Input",
+        dest="Input",
+        required=True,
+        type=file_exists,
+        help="Output file or path produced from Yleaf",
+        metavar="FILE",
+    )
 
-    parser.add_argument("-out", "--Outfile",
-                        dest="Outputfile", required=True,
-                        help="Output file name", metavar="FILE")
+    parser.add_argument(
+        "-out",
+        "--Outfile",
+        dest="Outputfile",
+        required=True,
+        help="Output file name",
+        metavar="FILE",
+    )
 
     args = parser.parse_args()
     return args
@@ -85,7 +99,9 @@ def get_intermediate_branch(init_hg, path_hg_prediction_tables):
     tmp_init_hg = init_hg + "_int.txt"
     hg_intermediate_file = path_hg_prediction_tables + "/" + tmp_init_hg
     try:
-        df_intermediate = pd.read_csv(hg_intermediate_file, header=None, sep="\t", engine='python')
+        df_intermediate = pd.read_csv(
+            hg_intermediate_file, header=None, sep="\t", engine="python"
+        )
         return df_intermediate
     except:
         return pd.DataFrame()
@@ -134,8 +150,15 @@ def get_putative_hg_list(init_hg, hg, df_haplogroup_trimmed, df_haplogroup_all):
 
     for putative_hg in list_main_hg:
         # print(putative_hg)
-        total_qctwo = len(df_haplogroup_all.loc[df_haplogroup_all["haplogroup"] == putative_hg])
-        ahg = np.sum("A" == df_haplogroup_all.loc[df_haplogroup_all["haplogroup"] == putative_hg]["state"])
+        total_qctwo = len(
+            df_haplogroup_all.loc[df_haplogroup_all["haplogroup"] == putative_hg]
+        )
+        ahg = np.sum(
+            df_haplogroup_all.loc[df_haplogroup_all["haplogroup"] == putative_hg][
+                "state"
+            ]
+            == "A"
+        )
         try:
             qc_two = round((total_qctwo - ahg) / total_qctwo, 3)
         except ZeroDivisionError:
@@ -147,7 +170,7 @@ def get_putative_hg_list(init_hg, hg, df_haplogroup_trimmed, df_haplogroup_all):
     if not bool(dict_hg):
         return dict_hg
     # in case of a A haplogroup
-    if init_hg == 'A':
+    if init_hg == "A":
         key = max(dict_hg)
         dict_hg.update({key: [dict_hg[key][0], 1]})
     else:
@@ -193,7 +216,9 @@ def calc_score_three(df_haplogroup, putative_hg, init_hg):
         if i.startswith(init_hg):
             list_main_hg_all.append(i)
     list_main_hg_all = sorted(list(set(list_main_hg_all)), reverse=True)
-    df_main_hg_all = df_haplogroup.loc[df_haplogroup["haplogroup"].isin(list_main_hg_all)]
+    df_main_hg_all = df_haplogroup.loc[
+        df_haplogroup["haplogroup"].isin(list_main_hg_all)
+    ]
     df_main_hg_all = df_main_hg_all[["haplogroup", "state", "marker_name"]]
     df_main_hg_all = df_main_hg_all.sort_values(by="haplogroup", ascending=False).values
     a_match = 0
@@ -223,11 +248,19 @@ def get_putative_ancenstral_hg(df_haplogroup, putative_hg):
     putative_ancestral_hg = []
     putative_hg = putative_hg.replace("~", "")
     df_putative_ancestral_hg = df_haplogroup.copy()
-    df_putative_ancestral_hg = df_putative_ancestral_hg[df_putative_ancestral_hg.haplogroup.str.startswith(putative_hg)]
-    df_putative_ancestral_hg['haplogroup'] = df_putative_ancestral_hg['haplogroup'].str.replace('~', '')
-    df_putative_ancestral_hg = df_putative_ancestral_hg[~df_putative_ancestral_hg.haplogroup.isin([putative_hg])]
-    df_putative_ancestral_hg = df_putative_ancestral_hg[df_putative_ancestral_hg.state == "A"]
-    df_putative_ancestral_hg = df_putative_ancestral_hg.sort_values(by=['haplogroup'])
+    df_putative_ancestral_hg = df_putative_ancestral_hg[
+        df_putative_ancestral_hg.haplogroup.str.startswith(putative_hg)
+    ]
+    df_putative_ancestral_hg["haplogroup"] = df_putative_ancestral_hg[
+        "haplogroup"
+    ].str.replace("~", "")
+    df_putative_ancestral_hg = df_putative_ancestral_hg[
+        ~df_putative_ancestral_hg.haplogroup.isin([putative_hg])
+    ]
+    df_putative_ancestral_hg = df_putative_ancestral_hg[
+        df_putative_ancestral_hg.state == "A"
+    ]
+    df_putative_ancestral_hg = df_putative_ancestral_hg.sort_values(by=["haplogroup"])
 
     for i in df_putative_ancestral_hg.index:
         if len(putative_ancestral_hg) == 0:
@@ -272,14 +305,18 @@ def main():
     args = get_arguments()
 
     path_samples = args.Input  # .out files are collected
-    samples = check_if_folder(path_samples, '.out')
+    samples = check_if_folder(path_samples, ".out")
     out_file = args.Outputfile
-    hg_intermediate = str(yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER)
+    hg_intermediate = str(
+        yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER
+    )
     intermediate_tree_table = hg_intermediate + "/Intermediates.txt"
     h_flag = True
     log_output = []
 
-    df_intermediate_static = pd.read_csv(intermediate_tree_table, header=None, engine='python')
+    df_intermediate_static = pd.read_csv(
+        intermediate_tree_table, header=None, engine="python"
+    )
     intermediates_static = df_intermediate_static[0].values
 
     for sample_name in samples:
@@ -291,15 +328,17 @@ def main():
 
         intermediates = intermediates_static
 
-        df_haplogroup_all = pd.read_csv(sample_name, sep="\t", engine='python')
-        df_haplogroup_all = df_haplogroup_all.sort_values(by=['haplogroup'])
+        df_haplogroup_all = pd.read_csv(sample_name, sep="\t", engine="python")
+        df_haplogroup_all = df_haplogroup_all.sort_values(by=["haplogroup"])
 
         df_haplogroup_trimmed = df_haplogroup_all.copy()
 
         df_derived = df_haplogroup_all.copy()
         df_derived = df_derived[df_derived["state"] == "D"]
 
-        df_haplogroup_trimmed['haplogroup'] = df_haplogroup_trimmed['haplogroup'].str.replace('~', '')
+        df_haplogroup_trimmed["haplogroup"] = df_haplogroup_trimmed[
+            "haplogroup"
+        ].str.replace("~", "")
         # instance with only D state
         df_tmp = df_derived
         for hg in intermediates:
@@ -313,13 +352,21 @@ def main():
         df_intermediate = get_intermediate_branch(init_hg, hg_intermediate)
         qc_one = calc_score_one(df_intermediate, df_haplogroup_trimmed)
 
-        df_haplogroup_trimmed = df_haplogroup_trimmed[~df_haplogroup_trimmed.haplogroup.isin(intermediates)]
+        df_haplogroup_trimmed = df_haplogroup_trimmed[
+            ~df_haplogroup_trimmed.haplogroup.isin(intermediates)
+        ]
 
         df_derived = df_derived[~df_derived.haplogroup.isin(intermediates)]
-        hg = df_derived[(df_derived.haplogroup.str.startswith(init_hg))].haplogroup.values
+        hg = df_derived[
+            (df_derived.haplogroup.str.startswith(init_hg))
+        ].haplogroup.values
 
-        dict_hg = get_putative_hg_list(init_hg, hg, df_haplogroup_trimmed, df_haplogroup_all)
-        keys = sorted(dict_hg.keys(), reverse=True, key=lambda x: x.replace("~", ""))  # apparently tilde has a
+        dict_hg = get_putative_hg_list(
+            init_hg, hg, df_haplogroup_trimmed, df_haplogroup_all
+        )
+        keys = sorted(
+            dict_hg.keys(), reverse=True, key=lambda x: x.replace("~", "")
+        )  # apparently tilde has a
         # higher ASCII value, resulting in a wrong order
 
         mismatches = []
@@ -347,14 +394,18 @@ def main():
         if flag:
             putative_hg = max(hg_list, key=len)
 
-        putative_ancestral_hg = get_putative_ancenstral_hg(df_haplogroup_all, putative_hg)
+        putative_ancestral_hg = get_putative_ancenstral_hg(
+            df_haplogroup_all, putative_hg
+        )
 
         # Output
         header = "Sample_name\tHg\tHg_marker\tTotal_reads\tValid_markers\tQC-score\tQC-1\tQC-2\tQC-3"
-        marker_name = df_haplogroup_all.loc[df_haplogroup_all["haplogroup"] == putative_hg]["marker_name"].values
+        marker_name = df_haplogroup_all.loc[
+            df_haplogroup_all["haplogroup"] == putative_hg
+        ]["marker_name"].values
         if putative_hg == "NA":
             out_hg = "NA"
-            output = "{}\tNA\tNA\t{}\t{}\t0\t0\t0\t0".format(out_name, total_reads, valid_markers)
+            output = f"{out_name}\tNA\tNA\t{total_reads}\t{valid_markers}\t0\t0\t0\t0"
             log_output.append(out_name)
         else:
             if len(marker_name) > 1:
@@ -371,12 +422,10 @@ def main():
                 out_hg = "".join(out_hg)
             qc_score = round((qc_one * qc_two * qc_three), 3)
             if qc_score >= 0.7:
-                output = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(out_name, putative_hg, out_hg, total_reads,
-                                                                     valid_markers, qc_score, qc_one, qc_two, qc_three)
+                output = f"{out_name}\t{putative_hg}\t{out_hg}\t{total_reads}\t{valid_markers}\t{qc_score}\t{qc_one}\t{qc_two}\t{qc_three}"
             else:
                 log_output.append(out_name)
-                output = "{}\tNA\tNA\t{}\t{}\t{}\t{}\t{}\t{}".format(out_name, total_reads, valid_markers, qc_score,
-                                                                     qc_one, qc_two, qc_three)
+                output = f"{out_name}\tNA\tNA\t{total_reads}\t{valid_markers}\t{qc_score}\t{qc_one}\t{qc_two}\t{qc_three}"
 
         with open(out_file, "a") as w_file:
             if h_flag:
@@ -386,7 +435,9 @@ def main():
             w_file.write(output)
 
     if len(log_output) > 0:
-        print("Warning: Following sample(s) showed discrepancies, please check output(s) manually: ")
+        print(
+            "Warning: Following sample(s) showed discrepancies, please check output(s) manually: "
+        )
         print("\n".join(log_output))
 
     print("--- Yleaf 'Y-Haplogroup prediction' finished... ---")

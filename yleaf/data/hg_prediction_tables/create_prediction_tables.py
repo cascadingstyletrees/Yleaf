@@ -1,7 +1,8 @@
-import networkx as nx
 import json
 
-major_tree = json.load(open('tree_major.json'))
+import networkx as nx
+
+major_tree = json.load(open("tree_major.json"))
 
 G = nx.Graph(major_tree)
 
