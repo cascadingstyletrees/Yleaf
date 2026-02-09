@@ -24,7 +24,12 @@ class TestPredictHaplogroup(unittest.TestCase):
         # We also need to make sure we don't hit the per-sample cache across tests if we had multiple
         predict_haplogroup.QC1_SCORE_CACHE = {}
 
-        score = get_qc1_score(path, haplotype_dict)
+        intermediate_states = {
+            value: haplotype_dict[value]
+            for value in predict_haplogroup.BACKBONE_GROUPS
+            if value in haplotype_dict
+        }
+        score = get_qc1_score(path, intermediate_states)
 
         # R1 is in intermediate_states. expected state is {D}. Actual state is D.
         # So score[0] (matching) should be 1.
@@ -43,7 +48,13 @@ class TestPredictHaplogroup(unittest.TestCase):
         haplotype_dict["R1"] = linker
 
         predict_haplogroup.QC1_SCORE_CACHE = {}
-        score = get_qc1_score(path, haplotype_dict)
+
+        intermediate_states = {
+            value: haplotype_dict[value]
+            for value in predict_haplogroup.BACKBONE_GROUPS
+            if value in haplotype_dict
+        }
+        score = get_qc1_score(path, intermediate_states)
 
         # Matching: 0. Total: 1. Score: 0.0.
         self.assertEqual(score, 0.0)

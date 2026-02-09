@@ -315,6 +315,13 @@ def get_most_likely_haplotype(
     sorted_depth_haplotypes = sorted(
         haplotype_dict.keys(), key=lambda k: tree.get(k).depth, reverse=True
     )
+
+    intermediate_states = {
+        value: haplotype_dict[value]
+        for value in BACKBONE_GROUPS
+        if value in haplotype_dict
+    }
+
     covered_nodes = set()
     best_score = ("NA", "NA", "NA", "NA", "NA", "NA", "NA")
 
@@ -349,7 +356,7 @@ def get_most_likely_haplotype(
 
             parent = parent.parent
 
-        qc1_score = get_qc1_score(path, haplotype_dict)
+        qc1_score = get_qc1_score(path, intermediate_states)
 
         # if any of the scores are below treshold, the total can not be above so ignore
         if qc1_score < treshold:
@@ -405,14 +412,11 @@ def get_most_likely_haplotype(
     return best_score
 
 
-def get_qc1_score(path: list[str], haplotype_dict: dict[str, HgMarkersLinker]) -> float:
+def get_qc1_score(
+    path: list[str], intermediate_states: dict[str, HgMarkersLinker]
+) -> float:
     """Get the first quality score as described in the get_most_likely_haplotype function"""
     most_specific_backbone = None
-    intermediate_states = {
-        value: haplotype_dict[value]
-        for value in BACKBONE_GROUPS
-        if value in haplotype_dict
-    }
     for value in path:
         if value in MAIN_HAPLO_GROUPS:
             most_specific_backbone = value
