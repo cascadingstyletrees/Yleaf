@@ -126,6 +126,8 @@ class YleafPipeline:
                         with open(stderr_file, "r") as err_read:
                             stderr_content = err_read.read()
                         raise ExternalCommandError(" ".join(cmd), process.returncode, stderr_content)
+        except ExternalCommandError:
+            raise
         except Exception as e:
             LOG.error(f"Failed to run bcftools query: {e}")
             raise ExternalCommandError(" ".join(cmd), -1, str(e))
@@ -182,8 +184,8 @@ class YleafPipeline:
              general_info_list = ["Total of mapped reads: VCF", "Total of unmapped reads: VCF"]
              general_info_list += ["Valid markers: 0"]
              general_info_list.append("Markers with zero reads: 0")
-             general_info_list.append("Markers below the read threshold {0}: 0") # Thresholds not readily available here without args access or hardcoding default logic
-             general_info_list.append("Markers below the base majority threshold {0}: 0")
+             general_info_list.append(f"Markers below the read threshold {{{args.reads_treshold}}}: 0")
+             general_info_list.append(f"Markers below the base majority threshold {{{args.base_majority}}}: 0")
              general_info_list.append("Markers with discordant genotype: 0")
              general_info_list.append("Markers without haplogroup information: 0")
              general_info_list.append("Markers with haplogroup information: 0")
@@ -765,6 +767,8 @@ class YleafPipeline:
                 stdout_data, stderr_data = process.communicate()
                 if process.returncode != 0:
                      raise ExternalCommandError(" ".join(cmd), process.returncode, stderr_data.decode("utf-8"))
+        except ExternalCommandError:
+            raise
         except Exception as e:
             raise ExternalCommandError(" ".join(cmd), -1, str(e))
 
