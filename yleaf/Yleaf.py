@@ -109,22 +109,29 @@ class YleafPipeline:
         cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n", str(sample_vcf_file)]
 
         # Stream output to pandas
+        # To avoid deadlock when reading from stdout while stderr fills up, we redirect stderr to a temp file.
+        # This is robust for large outputs and large error logs.
+        stderr_file = sample_vcf_folder / "bcftools.stderr"
         try:
-            # Using Popen context manager to ensure cleanup
-            with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
-                try:
-                    pileupfile = pd.read_csv(process.stdout, dtype=str, header=None, sep="\t")
-                except pd.errors.EmptyDataError:
-                    # Handle empty output gracefully
-                    pileupfile = pd.DataFrame()
+            with open(stderr_file, "w") as err:
+                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True) as process:
+                    try:
+                        pileupfile = pd.read_csv(process.stdout, dtype=str, header=None, sep="\t")
+                    except pd.errors.EmptyDataError:
+                        pileupfile = pd.DataFrame()
 
-                # Verify process success
-                stdout, stderr = process.communicate()
-                if process.returncode != 0:
-                    raise ExternalCommandError(" ".join(cmd), process.returncode, stderr)
+                    process.wait()
+                    if process.returncode != 0:
+                        # Read the error file content for the exception
+                        with open(stderr_file, "r") as err_read:
+                            stderr_content = err_read.read()
+                        raise ExternalCommandError(" ".join(cmd), process.returncode, stderr_content)
         except Exception as e:
             LOG.error(f"Failed to run bcftools query: {e}")
             raise ExternalCommandError(" ".join(cmd), -1, str(e))
+        finally:
+            if stderr_file.exists():
+                os.remove(stderr_file)
 
         if pileupfile.empty:
              LOG.warning(f"No data returned from bcftools for {sample_vcf_file}")
@@ -698,6 +705,8 @@ class YleafPipeline:
 
         LOG.debug(f"Started running the following command: {' '.join(cmd)}")
         # Streaming to pandas
+        # samtools idxstats output is usually small, so communicate() is fine and avoids deadlocks.
+        # But for consistency and robustness, let's stick to Popen/communicate which reads both buffers.
         try:
             with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
                 stdout_data, stderr_data = process.communicate()
