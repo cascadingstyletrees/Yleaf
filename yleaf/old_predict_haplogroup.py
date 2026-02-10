@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from yleaf import yleaf_constants
+from yleaf.configuration import Configuration
 
 
 def get_arguments():
@@ -303,12 +304,13 @@ def main():
     print("\tY-Haplogroup Prediction")
 
     args = get_arguments()
+    config = Configuration()
 
     path_samples = args.Input  # .out files are collected
     samples = check_if_folder(path_samples, ".out")
     out_file = args.Outputfile
     hg_intermediate = str(
-        yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER
+        config.data_folder / "hg_prediction_tables"
     )
     intermediate_tree_table = hg_intermediate + "/Intermediates.txt"
     h_flag = True

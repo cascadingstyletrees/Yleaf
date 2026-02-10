@@ -20,6 +20,7 @@ from collections import defaultdict
 import graphviz
 
 from yleaf import yleaf_constants
+from yleaf.configuration import Configuration
 from yleaf.tree import Tree
 
 LOG = logging.getLogger("yleaf_logger")
@@ -98,9 +99,10 @@ def add_main_haplogroups(haplogroups: list[str]):
 
 
 def haplogroup_tree_dict(haplogroups: list[str]) -> dict[str, set[str]]:
+    config = Configuration()
     tree = Tree(
-        yleaf_constants.DATA_FOLDER
-        / yleaf_constants.HG_PREDICTION_FOLDER
+        config.data_folder
+        / "hg_prediction_tables"
         / yleaf_constants.TREE_FILE
     )
     partial_tree_dict = defaultdict(set)
