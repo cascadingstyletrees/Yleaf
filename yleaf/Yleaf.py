@@ -14,6 +14,7 @@ Extensively modified by: Bram van Wersch
 
 import argparse
 import datetime
+import io
 import logging
 import multiprocessing
 import os
@@ -990,11 +991,19 @@ def chromosome_table(
     path_file: Path, path_folder: Path, file_name: str
 ) -> tuple[str, int, int]:
     output = path_folder / (file_name + ".chr")
-    tmp_output = path_folder / "tmp.txt"
-    f = open(tmp_output, "w")
-    cmd = f"samtools idxstats {path_file}"
-    call_command(cmd, stdout_location=f)
-    df_chromosome = pd.read_table(tmp_output, header=None)
+    cmd = ["samtools", "idxstats", str(path_file)]
+
+    LOG.debug(f"Started running the following command: {' '.join(cmd)}")
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False
+    )
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        LOG.error(f"Call: '{' '.join(cmd)}' failed. Reason given: '{stderr.decode('utf-8')}'")
+        raise SystemExit("Failed command execution")
+    LOG.debug(f"Finished running the command {' '.join(cmd)}")
+
+    df_chromosome = pd.read_csv(io.BytesIO(stdout), sep="\t", header=None)
 
     total_reads = sum(df_chromosome[2])
 
@@ -1006,9 +1015,6 @@ def chromosome_table(
     df_chromosome = df_chromosome.drop(columns=[1, 3])
     df_chromosome.columns = ["chr", "reads", "perc"]
     df_chromosome.to_csv(output, index=None, sep="\t")
-
-    f.close()
-    os.remove(tmp_output)
 
     if "Y" in df_chromosome["chr"].values:
         return "Y", total_reads, unmapped
