@@ -23,6 +23,7 @@ from typing import Any
 from yleaf import yleaf_constants
 from yleaf.configuration import Configuration
 from yleaf.tree import Node, Tree
+from yleaf.exceptions import ConfigurationError
 
 # Globals removed/encapsulated.
 # Constants
@@ -102,10 +103,9 @@ class HaplogroupPredictor:
                         continue
                     self.backbone_groups.add(line.strip())
         except FileNotFoundError:
-            LOG.error(f"Could not find intermediates file at {intermediates_file}")
-            # Should we raise? Probably.
-            # But original code didn't handle it explicitly (would crash).
-            pass
+            msg = f"Could not find intermediates file at {intermediates_file}. This file is critical for scoring."
+            LOG.error(msg)
+            raise ConfigurationError(msg)
 
         # add capitals A-Z to get all groups
         major_tree_list = [
@@ -501,22 +501,28 @@ def main(namespace: argparse.Namespace = None):
         / yleaf_constants.TREE_FILE
     )
 
-    predictor = HaplogroupPredictor(config, tree, namespace.minimum_score)
-    final_table = []
+    try:
+        predictor = HaplogroupPredictor(config, tree, namespace.minimum_score)
+        final_table = []
 
-    with multiprocessing.Pool(processes=threads) as p:
-        predictions = p.map(
-            partial(run_prediction_wrapper, predictor),
-            read_input_folder(in_folder),
-        )
+        with multiprocessing.Pool(processes=threads) as p:
+            predictions = p.map(
+                partial(run_prediction_wrapper, predictor),
+                read_input_folder(in_folder),
+            )
 
-    for haplotype_dict, best_haplotype_score, folder in predictions:
-        if haplotype_dict is None:
-            continue
-        add_to_final_table(final_table, haplotype_dict, best_haplotype_score, folder)
+        for haplotype_dict, best_haplotype_score, folder in predictions:
+            if haplotype_dict is None:
+                continue
+            add_to_final_table(final_table, haplotype_dict, best_haplotype_score, folder)
 
-    write_final_table(final_table, output)
-    LOG.debug("Finished haplogroup prediction")
+        write_final_table(final_table, output)
+        LOG.debug("Finished haplogroup prediction")
+    except ConfigurationError as e:
+        LOG.error(f"Haplogroup prediction failed due to configuration error: {e}")
+        # We might want to exit with non-zero status
+        import sys
+        sys.exit(1)
 
 
 if __name__ == "__main__":
