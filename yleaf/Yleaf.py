@@ -135,7 +135,60 @@ class YleafPipeline:
 
         if pileupfile.empty:
              LOG.warning(f"No data returned from bcftools for {sample_vcf_file}")
-             # Create empty output files?
+             # Create placeholder output files to ensure downstream processing handles this sample as "NA"
+             # instead of skipping it entirely.
+             outputfile = sample_vcf_folder / (sample_vcf_file.name.replace(".vcf.gz", ".out"))
+             fmf_output = sample_vcf_folder / (sample_vcf_file.name.replace(".vcf.gz", ".fmf"))
+
+             # Create empty .out file with header
+             with open(outputfile, "w") as f:
+                 f.write(
+                    "\t".join(
+                        [
+                            "chr",
+                            "pos",
+                            "marker_name",
+                            "haplogroup",
+                            "mutation",
+                            "anc",
+                            "der",
+                            "reads",
+                            "called_perc",
+                            "called_base",
+                            "state",
+                            "depth\n",
+                        ]
+                    )
+                )
+
+             # Create empty .fmf file with header
+             fmf_header = [
+                "chr",
+                "pos",
+                "marker_name",
+                "haplogroup",
+                "mutation",
+                "anc",
+                "der",
+                "reads",
+                "called_perc",
+                "called_base",
+                "state",
+                "Description",
+            ]
+             pd.DataFrame(columns=fmf_header).to_csv(fmf_output, sep="\t", index=False)
+
+             # Write info file
+             general_info_list = ["Total of mapped reads: VCF", "Total of unmapped reads: VCF"]
+             general_info_list += ["Valid markers: 0"]
+             general_info_list.append("Markers with zero reads: 0")
+             general_info_list.append("Markers below the read threshold {0}: 0") # Thresholds not readily available here without args access or hardcoding default logic
+             general_info_list.append("Markers below the base majority threshold {0}: 0")
+             general_info_list.append("Markers with discordant genotype: 0")
+             general_info_list.append("Markers without haplogroup information: 0")
+             general_info_list.append("Markers with haplogroup information: 0")
+
+             self.write_info_file(sample_vcf_folder, general_info_list)
              return
 
         pileupfile.columns = ["chr", "pos", "refbase", "altbase", "reads"]
@@ -610,7 +663,7 @@ class YleafPipeline:
 
     def check_reference(self, requested_version: str):
         reference_file = self.get_reference_path(requested_version, True)
-        if os.path.getsize(reference_file) < 100:
+        if not reference_file.exists() or os.path.getsize(reference_file) < 100:
             LOG.info(
                 f"No reference genome version was found. Downloading the {requested_version} reference genome. This "
                 f"should be a one time thing."
