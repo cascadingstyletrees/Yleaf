@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import MagicMock, patch
 import pandas as pd
 import sys
 from pathlib import Path
@@ -7,16 +7,15 @@ import subprocess
 
 # Add the project root to sys.path
 sys.path.append(".")
-from yleaf.Yleaf import YleafPipeline
-from yleaf.configuration import Configuration
+from yleaf import Yleaf
 
 class TestVcfPipe(unittest.TestCase):
 
     @patch('pandas.DataFrame.to_csv')
     @patch('yleaf.Yleaf.pd.read_csv')
     @patch('yleaf.Yleaf.subprocess.Popen')
-    @patch('yleaf.Yleaf.YleafPipeline.safe_create_dir')
-    @patch('yleaf.Yleaf.YleafPipeline.write_info_file')
+    @patch('yleaf.Yleaf.safe_create_dir')
+    @patch('yleaf.Yleaf.write_info_file')
     @patch('yleaf.Yleaf.Tree')
     def test_run_vcf_pipe_logic(self, mock_tree, mock_write_info, mock_create_dir, mock_popen, mock_read_csv, mock_to_csv):
         # Setup mocks
@@ -54,32 +53,21 @@ class TestVcfPipe(unittest.TestCase):
 
         mock_read_csv.side_effect = read_csv_side_effect
 
-        # Mock subprocess process context manager
+        # Mock subprocess process
         process_mock = MagicMock()
         process_mock.stdout = "PIPE_HANDLE" # Just a placeholder
         process_mock.returncode = 0
+        mock_popen.return_value = process_mock
 
-        # Popen context manager
-        mock_popen.return_value.__enter__.return_value = process_mock
-
-        # Mock open for stderr file and output file writing
-        # Use a context manager mock for open
-        mock_file_ctx = MagicMock()
-        mock_file_obj = MagicMock()
-        mock_file_ctx.__enter__.return_value = mock_file_obj
-
-        with patch("builtins.open", return_value=mock_file_ctx):
+        # Mock open for the output file writing at the end of run_vcf
+        # We also need to handle the file writing context manager in the final step of run_vcf
+        with patch("builtins.open", unittest.mock.mock_open()):
              # Run the function
-            config = Configuration()
-            pipeline = YleafPipeline(config)
-            pipeline.run_vcf(path_markerfile, base_out_folder, args, sample_vcf_file)
+            Yleaf.run_vcf(path_markerfile, base_out_folder, args, sample_vcf_file)
 
         # Verify subprocess.Popen was called correctly
-        # stdout is PIPE, stderr is the mocked file object (result of __enter__)
         expected_cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n", str(sample_vcf_file)]
-
-        # Check that it was called with our mock file for stderr
-        mock_popen.assert_called_with(expected_cmd, stdout=subprocess.PIPE, stderr=mock_file_obj, text=True)
+        mock_popen.assert_called_with(expected_cmd, stdout=subprocess.PIPE, shell=False)
 
         # Verify pd.read_csv was called with the pipe handle
         found_call = False
@@ -94,7 +82,7 @@ class TestVcfPipe(unittest.TestCase):
                 break
         self.assertTrue(found_call, "pd.read_csv was not called with the process stdout pipe")
 
-        # Verify process.wait() was called (not communicate, because we use the file)
+        # Verify process.wait() was called
         process_mock.wait.assert_called_once()
 
 if __name__ == '__main__':

@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from yleaf import yleaf_constants
-from yleaf.configuration import Configuration
 from yleaf.tree import Node, Tree
-from yleaf.exceptions import ConfigurationError
 
-# Globals removed/encapsulated.
-# Constants
+BACKBONE_GROUPS: set = set()
+MAIN_HAPLO_GROUPS: set = set()
+QC1_SCORE_CACHE: dict[str, float] = {}
+EXPECTED_STATES_CACHE: dict[str, dict[str, set[str]]] = {}
+
 DEFAULT_MIN_SCORE = 0.95
 
 LOG = logging.getLogger("yleaf_logger")
@@ -70,8 +71,7 @@ class HgMarkersLinker:
     def get_state(self) -> str:
         """at least a fraction of 0.6 need to either derived or ancestral, otherwise the state can not be accurately
         determined and will be returned as undefined"""
-        if self.nr_total == 0:
-             return self.UNDEFINED
+
         if self.nr_derived / self.nr_total >= 0.6:
             return self.DERIVED
         if self.nr_ancestral / self.nr_total >= 0.6:
@@ -79,373 +79,66 @@ class HgMarkersLinker:
         return self.UNDEFINED
 
 
-class HaplogroupPredictor:
-    def __init__(self, config: Configuration, tree: Tree, min_score: float = DEFAULT_MIN_SCORE):
-        self.config = config
-        self.tree = tree
-        self.min_score = min_score
-        self.backbone_groups: set[str] = set()
-        self.main_haplo_groups: set[str] = set()
-        self.expected_states_cache: dict[str, dict[str, set[str]]] = {}
-        self.qc1_score_cache: dict[str, float] = {}
-
-        self._load_backbone_groups()
-
-    def _load_backbone_groups(self):
-        """Read some basic data that is always needed"""
-        hg_pred_folder = self.config.data_folder / "hg_prediction_tables"
-        intermediates_file = hg_pred_folder / "major_tables/Intermediates.txt"
-
-        try:
-            with open(intermediates_file) as f:
-                for line in f:
-                    if "~" in line:
-                        continue
-                    self.backbone_groups.add(line.strip())
-        except FileNotFoundError:
-            msg = f"Could not find intermediates file at {intermediates_file}. This file is critical for scoring."
-            LOG.error(msg)
-            raise ConfigurationError(msg)
-
-        # add capitals A-Z to get all groups
-        major_tree_list = [
-            "A00", "A00a", "A00b", "A00c", "A0-T", "A1", "A1b", "A1b1", "BT", "CT", "CF",
-            "F", "F4", "F2", "F3", "GHIJK", "G", "HIJK", "H", "IJK", "IJ", "I", "I2", "I1",
-            "J", "J1", "J2", "K", "K2", "K2d", "K2c", "K2b", "P", "R", "R2", "R1", "R1b",
-            "R1a", "Q", "K2b1", "S", "M", "NO", "O", "N", "LT", "L", "T", "F1", "C", "DE",
-            "D", "E", "B", "A1a", "A0",
-        ]
-
-        for major_hg in major_tree_list:
-            self.main_haplo_groups.add(major_hg)
-
-    def predict(self, folder: Path) -> list[Any]:
-        # Reset per-sample cache
-        self.qc1_score_cache = {}
-
-        if folder.name == "filtered_vcf_files":
-            return [None, None, None]
-
-        try:
-            haplotype_dict = read_yleaf_out_file(folder / (folder.name + ".out"))
-        except FileNotFoundError:
-            LOG.warning(
-                f"WARNING: failed to find .out file from yleaf run for sample {folder.name}. This sample will"
-                " be skipped."
-            )
-            return [None, None, None]
-
-        best_haplotype_score = self.get_most_likely_haplotype(
-            haplotype_dict, self.min_score
-        )
-        return [haplotype_dict, best_haplotype_score, folder]
-
-    def get_most_likely_haplotype(
-        self, haplotype_dict: dict[str, HgMarkersLinker], treshold: float
-    ) -> tuple[str, str | list[str], float, float, float, float, int | str]:
-        sorted_depth_haplotypes = sorted(
-            haplotype_dict.keys(), key=lambda k: self.tree.get(k).depth, reverse=True
-        )
-
-        intermediate_states = {
-            value: haplotype_dict[value]
-            for value in self.backbone_groups
-            if value in haplotype_dict
-        }
-
-        covered_nodes = set()
-        best_score = ("NA", "NA", "NA", "NA", "NA", "NA", "NA")
-
-        for haplotype_name in sorted_depth_haplotypes:
-            node = self.tree.get(haplotype_name)
-
-            # only record most specific nodes regardless of scores
-            if node.name in covered_nodes:
-                continue
-            parent = node.parent
-            path = [node.name]
-
-            # caclulate score 3 already since this is most efficient
-            qc3_score_match = 0
-            qc3_score_total = 0
-
-            # walk the tree back
-            while parent is not None:
-                path.append(parent.name)
-                if (
-                    parent.name in haplotype_dict
-                    and node.name[0] in parent.name
-                    and parent.name != node.name[0]
-                ):
-                    # in the same overal haplogroup
-                    state = haplotype_dict[parent.name].get_state()
-                    if state == HgMarkersLinker.DERIVED:
-                        qc3_score_match += 1
-
-                    # in case it can not be decided what the state is ratio between 0.4 and 0.6
-                    if state != HgMarkersLinker.UNDEFINED:
-                        qc3_score_total += 1
-
-                parent = parent.parent
-
-            qc1_score = self.get_qc1_score(path, intermediate_states)
-
-            # if any of the scores are below treshold, the total can not be above so ignore
-            if qc1_score < treshold:
-                continue
-
-            if haplotype_dict[node.name].nr_total == 0:
-                qc2_score = 0
-            else:
-                qc2_score = (
-                    haplotype_dict[node.name].nr_derived
-                    / haplotype_dict[node.name].nr_total
-                )
-                if qc2_score < treshold:
-                    continue
-
-            if qc3_score_total == 0:
-                final_qc3_score = 0.0
-            else:
-                final_qc3_score = qc3_score_match / qc3_score_total
-                if final_qc3_score < treshold:
-                    continue
-
-            total_score = math.prod([qc1_score, qc2_score, final_qc3_score])
-
-            # if above filter we found the hit
-            if total_score > treshold:
-                ancestral_children = self.get_ancestral_children(node, haplotype_dict)
-                best_score = (
-                    node.name,
-                    ancestral_children,
-                    qc1_score,
-                    qc2_score,
-                    final_qc3_score,
-                    total_score,
-                    node.depth,
-                )
-                break
-
-            # else, no hit is found, but still report Quality Scores
-            else:
-                best_score = (
-                    "NA",
-                    "NA",
-                    qc1_score,
-                    qc2_score,
-                    final_qc3_score,
-                    total_score,
-                    "NA",
-                )
-
-            # make sure that less specific nodes are not recorded
-            for node_name in path:
-                covered_nodes.add(node_name)
-        return best_score
-
-    def get_qc1_score(
-        self, path: list[str], intermediate_states: dict[str, HgMarkersLinker]
-    ) -> float:
-        most_specific_backbone = None
-        for value in path:
-            if value in self.main_haplo_groups:
-                most_specific_backbone = value
-                break
-
-        if most_specific_backbone is None:
-            return 0
-
-        # Check cache
-        if most_specific_backbone in self.qc1_score_cache:
-            return self.qc1_score_cache[most_specific_backbone]
-
-        # Load expected states if not cached
-        hg_folder = self.config.data_folder / "hg_prediction_tables"
-        if most_specific_backbone in self.expected_states_cache:
-            expected_states = self.expected_states_cache[most_specific_backbone]
-        else:
-            expected_states = {}
-            int_file = hg_folder / f"major_tables/{most_specific_backbone}_int.txt"
-            try:
-                with open(int_file) as f:
-                    for line in f:
-                        if line == "":
-                            continue
-                        name, state = line.strip().split("\t")
-                        expected_states[name] = {*state.split("/")}
-            except FileNotFoundError:
-                # If file missing, assume empty
-                pass
-            self.expected_states_cache[most_specific_backbone] = expected_states
-
-        score_match = 0
-        score_total = 0
-        for name, marker_linker in intermediate_states.items():
-            # If name not in expected_states, we skip? Original code would fail KeyError if not present?
-            # Original code: expected_possible_states = expected_states[name]
-            # This implies 'name' from intermediate_states MUST be in expected_states.
-            # But intermediate_states comes from BACKBONE_GROUPS check.
-            if name in expected_states:
-                expected_possible_states = expected_states[name]
-                state = marker_linker.get_state()
-                if state in expected_possible_states:
-                    score_match += 1
-                if state != HgMarkersLinker.UNDEFINED:
-                    score_total += 1
-            else:
-                # What if intermediate state is not in expected states for this backbone?
-                # Original code would crash if name not in expected_states.
-                # Assuming data integrity.
-                pass
-
-        if score_total == 0:
-            return 0
-
-        qc1_score = score_match / score_total
-        self.qc1_score_cache[most_specific_backbone] = qc1_score
-        return qc1_score
-
-    def get_ancestral_children(
-        self, node: Node, haplotype_dict: dict[str, HgMarkersLinker]
-    ) -> list[str]:
-        ancestral_children = []
-        to_cover = [node]
-        while len(to_cover) > 0:
-            curr_node = to_cover.pop()
-            for name in curr_node.children:
-                if name in haplotype_dict:
-                    state = haplotype_dict[name].get_state()
-                    if state == HgMarkersLinker.ANCESTRAL:
-                        ancestral_children.append(name)
-                        continue
-                to_cover.append(self.tree.get(name))
-        return ancestral_children
-
-
-def read_yleaf_out_file(file: Path | str) -> dict[str, HgMarkersLinker]:
-    """Read the full yleaf .out file and parse all lines into a dictionary keyed on haplogroups"""
-    haplotype_dict = {}
-    with open(file) as f:
-        f.readline() # skip header
-        for line in f:
-            parts = line.strip().split("\t")
-            # _, _, marker, haplogroup, _, _, _, _, _, _, state, _ = line.strip().split("\t")
-            # Using unpacking with known structure from Yleaf.py
-            # "chr", "pos", "marker_name", "haplogroup", "mutation", "anc", "der", "reads", "called_perc", "called_base", "state", "depth"
-            if len(parts) < 11:
-                continue
-            marker = parts[2]
-            haplogroup = parts[3]
-            state = parts[10]
-
-            if haplogroup not in haplotype_dict:
-                haplotype_dict[haplogroup] = HgMarkersLinker()
-            haplotype_dict[haplogroup].add(marker, state)
-    return haplotype_dict
-
-
-def read_input_folder(folder_name: str) -> Iterator[Path]:
-    """Read all the folders present in the input folder."""
-    in_folder = Path(folder_name)
-    for folder in in_folder.iterdir():
-        if not folder.is_dir():
-            continue
-        if folder.name == yleaf_constants.FASTQ_BAM_FILE_FOLDER:
-            continue
-        yield folder
-
-
-def add_to_final_table(
-    final_table: list[list[Any]],
-    haplotype_dict: dict[str, HgMarkersLinker],
-    best_haplotype_scores: tuple,
+def main_predict_haplogroup(
+    namespace: argparse.Namespace,
+    tree: Tree,
     folder: Path,
 ):
-    total_reads, valid_markers = process_info_file(folder / (folder.name + ".info"))
-    hg, ancestral_children, qc1, qc2, qc3, total, _ = best_haplotype_scores
+    # make sure to reset this for each sample
+    global QC1_SCORE_CACHE
+    QC1_SCORE_CACHE = {}
 
-    # Format QC scores
-    # Original code: qc1, qc2, qc3 are floats.
-    # We keep them as is.
-
-    if hg == "NA":
-        final_table.append(
-            [folder.name, hg, "", total_reads, valid_markers, total, qc1, qc2, qc3]
-        )
-        return
-    marker_list = list(haplotype_dict[hg].get_derived_markers())
-    if len(marker_list) > 2:
-        marker_list = marker_list[:2] + ["etc."]
-
-    ancestral_children_list = ancestral_children if isinstance(ancestral_children, list) else []
-
-    if len(ancestral_children_list) > 0:
-        ancestral_string = "x" + ",".join(ancestral_children_list)
-        final_table.append(
-            [
-                folder.name,
-                f"{hg}*({ancestral_string})",
-                ";".join(marker_list),
-                total_reads,
-                valid_markers,
-                total,
-                qc1,
-                qc2,
-                qc3,
-            ]
-        )
-    else:
-        final_table.append(
-            [
-                folder.name,
-                hg,
-                ";".join(marker_list),
-                total_reads,
-                valid_markers,
-                total,
-                qc1,
-                qc2,
-                qc3,
-            ]
-        )
-
-
-def process_info_file(info_file: Path) -> tuple[int | str, int | str]:
-    total_reads = "NA"
-    valid_markers = "NA"
+    if folder.name == "filtered_vcf_files":
+        return [None, None, None]
 
     try:
-        with open(info_file) as f:
-            for line in f:
-                if line.startswith("Total of mapped reads:"):
-                    total_reads = line.replace("Total of mapped reads:", "").strip()
-                elif line.startswith("Markers with haplogroup information"):
-                    valid_markers = line.replace(
-                        "Markers with haplogroup information:", ""
-                    ).strip()
+        haplotype_dict = read_yleaf_out_file(folder / (folder.name + ".out"))
     except FileNotFoundError:
         LOG.warning(
-            "WARNING: failed to find .info file from yleaf run. This information is not critical but there"
-            " will be some missing values in the output."
+            f"WARNING: failed to find .out file from yleaf run for sample {folder.name}. This sample will"
+            " be skipped."
         )
-    return total_reads, valid_markers
+        return [None, None, None]
+    best_haplotype_score = get_most_likely_haplotype(
+        tree, haplotype_dict, namespace.minimum_score
+    )
+    return [haplotype_dict, best_haplotype_score, folder]
 
 
-def write_final_table(final_table: list[list[Any]], out_file: Path | str):
-    # sort for each sample based on QC-score
-    # values[5] is total score. values[0] is sample name.
-    # original: reverse=True (descending).
-    final_table.sort(key=lambda values: (values[0], values[5]), reverse=True)
+def main(namespace: argparse.Namespace = None):
+    """Main entry point for prediction script"""
+    LOG.info("Starting haplogroup prediction...")
+    if namespace is None:
+        namespace = get_arguments()
+    in_folder = namespace.input
+    output = namespace.outfile
+    threads = namespace.threads
+    read_backbone_groups()
+    final_table = []
 
-    header = "Sample_name\tHg\tHg_marker\tTotal_reads\tValid_markers\tQC-score\tQC-1\tQC-2\tQC-3\n"
-    with open(out_file, "w") as f:
-        f.write(header)
-        for line in final_table:
-            f.write("\t".join(map(str, line)) + "\n")
+    tree = Tree(
+        yleaf_constants.DATA_FOLDER
+        / yleaf_constants.HG_PREDICTION_FOLDER
+        / yleaf_constants.TREE_FILE
+    )
+
+    with multiprocessing.Pool(processes=threads) as p:
+        predictions = p.map(
+            partial(main_predict_haplogroup, namespace, tree),
+            read_input_folder(in_folder),
+        )
+
+    for haplotype_dict, best_haplotype_score, folder in predictions:
+        if haplotype_dict is None:
+            continue
+        add_to_final_table(final_table, haplotype_dict, best_haplotype_score, folder)
+
+    write_final_table(final_table, output)
+    LOG.debug("Finished haplogroup prediction")
 
 
 def get_arguments() -> argparse.Namespace:
+    """Get the arguments provided by the user to this script"""
     parser = argparse.ArgumentParser(
         description="Erasmus MC: Genetic Identification\n Y-Haplogroup Prediction"
     )
@@ -482,47 +175,392 @@ def get_arguments() -> argparse.Namespace:
     args = parser.parse_args()
     return args
 
-def run_prediction_wrapper(predictor: HaplogroupPredictor, folder: Path):
-    return predictor.predict(folder)
 
-def main(namespace: argparse.Namespace = None):
-    """Main entry point for prediction script"""
-    LOG.info("Starting haplogroup prediction...")
-    if namespace is None:
-        namespace = get_arguments()
-    in_folder = namespace.input
-    output = namespace.outfile
-    threads = namespace.threads
+def read_backbone_groups():
+    """Read some basic data that is always needed"""
+    global BACKBONE_GROUPS, MAIN_HAPLO_GROUPS
+    with open(
+        yleaf_constants.DATA_FOLDER
+        / yleaf_constants.HG_PREDICTION_FOLDER
+        / "major_tables/Intermediates.txt"
+    ) as f:
+        for line in f:
+            if "~" in line:
+                continue
+            BACKBONE_GROUPS.add(line.strip())
 
-    config = Configuration()
-    tree = Tree(
-        config.data_folder
-        / "hg_prediction_tables"
-        / yleaf_constants.TREE_FILE
+    # add capitals A-Z to get all groups
+    major_tree_list = [
+        "A00",
+        "A00a",
+        "A00b",
+        "A00c",
+        "A0-T",
+        "A1",
+        "A1b",
+        "A1b1",
+        "BT",
+        "CT",
+        "CF",
+        "F",
+        "F4",
+        "F2",
+        "F3",
+        "GHIJK",
+        "G",
+        "HIJK",
+        "H",
+        "IJK",
+        "IJ",
+        "I",
+        "I2",
+        "I1",
+        "J",
+        "J1",
+        "J2",
+        "K",
+        "K2",
+        "K2d",
+        "K2c",
+        "K2b",
+        "P",
+        "R",
+        "R2",
+        "R1",
+        "R1b",
+        "R1a",
+        "Q",
+        "K2b1",
+        "S",
+        "M",
+        "NO",
+        "O",
+        "N",
+        "LT",
+        "L",
+        "T",
+        "F1",
+        "C",
+        "DE",
+        "D",
+        "E",
+        "B",
+        "A1a",
+        "A0",
+    ]
+
+    for major_hg in major_tree_list:
+        MAIN_HAPLO_GROUPS.add(major_hg)
+
+
+def read_input_folder(folder_name: str) -> Iterator[Path]:
+    """Read all the folders present in the input folder. These folders are assumed to be created by Yleaf containing
+    all the relevant information"""
+    in_folder = Path(folder_name)
+    for folder in in_folder.iterdir():
+        if not folder.is_dir():
+            continue
+        if folder.name == yleaf_constants.FASTQ_BAM_FILE_FOLDER:
+            # generated for efficiency during fastq, needs to be ignored
+            continue
+        yield folder
+
+
+def read_yleaf_out_file(file: Path | str) -> dict[str, HgMarkersLinker]:
+    """Read the full yleaf .out file and parse all lines into a dictionary keyed on haplogroups"""
+    haplotype_dict = {}
+    with open(file) as f:
+        f.readline()
+        for line in f:
+            _, _, marker, haplogroup, _, _, _, _, _, _, state, _ = line.strip().split(
+                "\t"
+            )
+            if haplogroup not in haplotype_dict:
+                haplotype_dict[haplogroup] = HgMarkersLinker()
+            haplotype_dict[haplogroup].add(marker, state)
+    return haplotype_dict
+
+
+def get_most_likely_haplotype(
+    tree: Tree, haplotype_dict: dict[str, HgMarkersLinker], treshold: float
+) -> tuple[str, str, int, int, int, int, int]:
+    """Get the most specific haplogroup with a score above the treshold. The score is build up from 3 parts:
+    QC1: This score indicates whether the predicted haplogroup follows the
+        expected backbone of the haplogroup tree structure (i.e. if haplogroup E
+        is predicted the markers defining: A0-T, A1, A1b, BT, CT, DE should be
+        in the derived state, while other intermediate markers like: CF, F, GHIJK,
+        etc, are expected to be in the ancestral state). The score is calculated by
+        dividing the number of markers that show the expected state, by the sum
+        of all intermediate markers. A score of 1 shows that all markers are in the
+        expected state and indicates high confidence if the prediction of the correct
+        broad haplogroup.
+    QC2: This score indicates whether equivalent markers to the final haplogroup
+        prediction were found in the ancestral state. I.e. if the final
+        haplogroup is R1b1a1a2a2, there are two markers in the assay defining
+        this haplogroup: Z2103 and Z2105, if both are found to be derived the
+        part 2 score value will be 1. However if one is in the derived and the other in
+        the ancestral state the QC2 value will be calculated as number of derived
+        equivalent markers divided by the total number of equivalent markers, in
+        this example the part 2 score value would be 0.5.
+    QC3: This score indicates whether the predicted haplogroup follows the
+        expected within-haplogroup tree structure. I.e. if the predicted haplogroup
+        is O2a1c (O-JST002611), it is expected that markers defining:
+        O2a1, O2a, O2 and O are also in the derived state. A score of 1 shows
+        that all markers are in the expected state and indicates high confidence
+        in the haplogroup prediction.
+
+    First all possible haplogroups are sorted based on the depth in the tree. This is the order haplogroup scores will
+    be calculated to determine if they are above the treshold. As soon as the treshold is reached the function returns.
+    """
+    sorted_depth_haplotypes = sorted(
+        haplotype_dict.keys(), key=lambda k: tree.get(k).depth, reverse=True
     )
 
-    try:
-        predictor = HaplogroupPredictor(config, tree, namespace.minimum_score)
-        final_table = []
+    intermediate_states = {
+        value: haplotype_dict[value]
+        for value in BACKBONE_GROUPS
+        if value in haplotype_dict
+    }
 
-        with multiprocessing.Pool(processes=threads) as p:
-            predictions = p.map(
-                partial(run_prediction_wrapper, predictor),
-                read_input_folder(in_folder),
+    covered_nodes = set()
+    best_score = ("NA", "NA", "NA", "NA", "NA", "NA", "NA")
+
+    for haplotype_name in sorted_depth_haplotypes:
+        node = tree.get(haplotype_name)
+
+        # only record most specific nodes regardless of scores
+        if node.name in covered_nodes:
+            continue
+        parent = node.parent
+        path = [node.name]
+
+        # caclulate score 3 already since this is most efficient
+        qc3_score = [0, 0]  # matching, total
+
+        # walk the tree back
+        while parent is not None:
+            path.append(parent.name)
+            if (
+                parent.name in haplotype_dict
+                and node.name[0] in parent.name
+                and parent.name != node.name[0]
+            ):
+                # in the same overal haplogroup
+                state = haplotype_dict[parent.name].get_state()
+                if state == HgMarkersLinker.DERIVED:
+                    qc3_score[0] += 1
+
+                # in case it can not be decided what the state is ratio between 0.4 and 0.6
+                if state != HgMarkersLinker.UNDEFINED:
+                    qc3_score[1] += 1
+
+            parent = parent.parent
+
+        qc1_score = get_qc1_score(path, intermediate_states)
+
+        # if any of the scores are below treshold, the total can not be above so ignore
+        if qc1_score < treshold:
+            continue
+
+        if haplotype_dict[node.name].nr_total == 0:
+            qc2_score = 0
+        else:
+            qc2_score = (
+                haplotype_dict[node.name].nr_derived
+                / haplotype_dict[node.name].nr_total
+            )
+            if qc2_score < treshold:
+                continue
+        if qc3_score[1] == 0:
+            qc3_score = 0
+        else:
+            qc3_score = qc3_score[0] / qc3_score[1]
+            if qc3_score < treshold:
+                continue
+
+        total_score = math.prod([qc1_score, qc2_score, qc3_score])
+
+        # if above filter we found the hit
+        if total_score > treshold:
+            ancestral_children = get_ancestral_children(node, haplotype_dict, tree)
+            best_score = (
+                node.name,
+                ancestral_children,
+                qc1_score,
+                qc2_score,
+                qc3_score,
+                total_score,
+                node.depth,
+            )
+            break
+
+        # else, no hit is found, but still report Quality Scores
+        else:
+            best_score = (
+                "NA",
+                "NA",
+                qc1_score,
+                qc2_score,
+                qc3_score,
+                total_score,
+                "NA",
             )
 
-        for haplotype_dict, best_haplotype_score, folder in predictions:
-            if haplotype_dict is None:
-                continue
-            add_to_final_table(final_table, haplotype_dict, best_haplotype_score, folder)
+        # make sure that less specific nodes are not recorded
+        for node_name in path:
+            covered_nodes.add(node_name)
+    return best_score
 
-        write_final_table(final_table, output)
-        LOG.debug("Finished haplogroup prediction")
-    except ConfigurationError as e:
-        LOG.error(f"Haplogroup prediction failed due to configuration error: {e}")
-        # We might want to exit with non-zero status
-        import sys
-        sys.exit(1)
+
+def get_qc1_score(
+    path: list[str], intermediate_states: dict[str, HgMarkersLinker]
+) -> float:
+    """Get the first quality score as described in the get_most_likely_haplotype function"""
+    most_specific_backbone = None
+    for value in path:
+        if value in MAIN_HAPLO_GROUPS:
+            most_specific_backbone = value
+            break
+
+    if most_specific_backbone is None:
+        return 0
+
+    global QC1_SCORE_CACHE
+    global EXPECTED_STATES_CACHE
+    # same backbone, same score
+    hg_folder = yleaf_constants.DATA_FOLDER / yleaf_constants.HG_PREDICTION_FOLDER
+    if most_specific_backbone in QC1_SCORE_CACHE:
+        return QC1_SCORE_CACHE[most_specific_backbone]
+    else:
+        if most_specific_backbone in EXPECTED_STATES_CACHE:
+            expected_states = EXPECTED_STATES_CACHE[most_specific_backbone]
+        else:
+            expected_states = {}
+            with open(f"{hg_folder}/major_tables/{most_specific_backbone}_int.txt") as f:
+                for line in f:
+                    if line == "":
+                        continue
+                    name, state = line.strip().split("\t")
+                    expected_states[name] = {*state.split("/")}
+            EXPECTED_STATES_CACHE[most_specific_backbone] = expected_states
+
+    score = [0, 0]  # matching, total
+    for name, marker_linker in intermediate_states.items():
+        expected_possible_states = expected_states[name]
+        state = marker_linker.get_state()
+        if state in expected_possible_states:
+            score[0] += 1
+        if state != HgMarkersLinker.UNDEFINED:
+            score[1] += 1
+    if score[1] == 0:
+        return 0
+
+    # cache the score
+    qc1_score = score[0] / score[1]
+    QC1_SCORE_CACHE[most_specific_backbone] = qc1_score
+    return qc1_score
+
+
+def get_ancestral_children(
+    node: Node, haplotype_dict: dict[str, HgMarkersLinker], tree: Tree
+) -> list[str]:
+    """Get the names of the first nodes that are ancestral children of the given node do this until no nodes are left
+    or all ancestral children are found"""
+    ancestral_children = []
+    # make sure to not modify the original
+    to_cover = [node]
+    while len(to_cover) > 0:
+        node = to_cover.pop()
+        for name in node.children:
+            if name in haplotype_dict:
+                state = haplotype_dict[name].get_state()
+                if state == HgMarkersLinker.ANCESTRAL:
+                    ancestral_children.append(name)
+                    continue
+            to_cover.append(tree.get(name))
+    return ancestral_children
+
+
+def add_to_final_table(
+    final_table: list[list[Any]],
+    haplotype_dict: dict[str, HgMarkersLinker],
+    best_haplotype_scores: tuple[str, str, int, int, int, int, int],
+    folder: Path,
+):
+    """Add the score to the final table and some additional information from the log file generated by Yleaf"""
+    total_reads, valid_markers = process_info_file(folder / (folder.name + ".info"))
+    hg, ancestral_children, qc1, qc2, qc3, total, _ = best_haplotype_scores
+    if hg == "NA":
+        final_table.append(
+            [folder.name, hg, "", total_reads, valid_markers, total, qc1, qc2, qc3]
+        )
+        return
+    marker_list = list(haplotype_dict[hg].get_derived_markers())
+    # dont show all markers if too many
+    if len(marker_list) > 2:
+        marker_list = marker_list[:2] + ["etc."]
+    if len(ancestral_children) > 0:
+        ancestral_string = "x" + ",".join(ancestral_children)
+        final_table.append(
+            [
+                folder.name,
+                f"{hg}*({ancestral_string})",
+                ";".join(marker_list),
+                total_reads,
+                valid_markers,
+                total,
+                qc1,
+                qc2,
+                qc3,
+            ]
+        )
+    else:
+        final_table.append(
+            [
+                folder.name,
+                hg,
+                ";".join(marker_list),
+                total_reads,
+                valid_markers,
+                total,
+                qc1,
+                qc2,
+                qc3,
+            ]
+        )
+
+
+def process_info_file(info_file: Path) -> tuple[int | str, int | str]:
+    """Read the log file produced by Yleaf for some additional information in the output"""
+    total_reads = "NA"
+    valid_markers = "NA"
+
+    try:
+        with open(info_file) as f:
+            for line in f:
+                if line.startswith("Total of mapped reads:"):
+                    total_reads = line.replace("Total of mapped reads:", "").strip()
+                elif line.startswith("Markers with haplogroup information"):
+                    valid_markers = line.replace(
+                        "Markers with haplogroup information:", ""
+                    ).strip()
+    except FileNotFoundError:
+        LOG.warning(
+            "WARNING: failed to find .info file from yleaf run. This information is not critical but there"
+            " will be some missing values in the output."
+        )
+    return total_reads, valid_markers
+
+
+def write_final_table(final_table: list[list[Any]], out_file: Path | str):
+    # sort for each sample based on QC-score
+    final_table.sort(key=lambda values: (values[0], values[5]), reverse=True)
+
+    header = "Sample_name\tHg\tHg_marker\tTotal_reads\tValid_markers\tQC-score\tQC-1\tQC-2\tQC-3\n"
+    with open(out_file, "w") as f:
+        f.write(header)
+        for line in final_table:
+            f.write("\t".join(map(str, line)) + "\n")
 
 
 if __name__ == "__main__":
