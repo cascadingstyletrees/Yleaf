@@ -112,17 +112,29 @@ def calc_score_one(df_intermediate, df_haplogroup):
     QC.1: Calculates the estimate of correct states from intermediate
     table and the total of intermediates found
     """
-    total = 0
-    correct_state = 0
-    for i in df_intermediate.values:
-        tmp = df_haplogroup.loc[df_haplogroup["haplogroup"] == i[0]]
-        if not tmp.empty:
-            if "/" in i[1]:
-                correct_state += len(tmp)
-                total += len(tmp)
-            else:
-                correct_state += np.sum(i[1] == tmp["state"])
-                total += len(tmp)
+    if df_intermediate.empty or df_haplogroup.empty:
+        return 0.0
+
+    # Merge df_intermediate (cols: 0=haplogroup, 1=expected_state) with df_haplogroup
+    merged = pd.merge(
+        df_intermediate, df_haplogroup, left_on=0, right_on="haplogroup", how="inner"
+    )
+
+    if merged.empty:
+        return 0.0
+
+    total = len(merged)
+    expected_state = merged[1].astype(str)
+    actual_state = merged["state"]
+
+    # Correct if wildcard "/" in expected state OR exact match
+    # Note: df_intermediate[1] might contain integers if no "/" is present in the whole column,
+    # so we cast to str before checking for "/"
+    has_slash = expected_state.str.contains("/", regex=False)
+    is_equal = expected_state == actual_state
+
+    correct_state = (has_slash | is_equal).sum()
+
     try:
         qc_one = round((correct_state / total), 3)
     except ZeroDivisionError:
