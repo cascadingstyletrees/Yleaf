@@ -42,8 +42,7 @@ CACHED_SNP_DATABASE: dict[str, list[dict[str, str]]] | None = None
 CACHED_REFERENCE_FILE: str | None = None
 ACCEPTED_REF_BASES: set[str] = {"A", "C", "G", "T"}
 
-START_RE = re.compile(r"\^.")
-INDEL_RE = re.compile(r"([+-])(\d+)")
+PILEUP_RE = re.compile(r"(\^.)|(\$)|(([+-])(\d+))")
 
 # path constants
 PREDICTION_OUT_FILE_NAME: str = "hg_prediction.hg"
@@ -1363,35 +1362,35 @@ def get_frequency_table(mpileup: list[str]) -> dict[str, list[int]]:
 def get_frequencies(sequence: str) -> dict[str, int]:
     sequence = sequence.upper()
 
-    # 1. Remove start markers "^."
-    sequence = START_RE.sub("", sequence)
-
-    # 2. Remove end markers "$"
-    sequence = sequence.replace("$", "")
-
-    # 3. Handle Indels
     indel_counts = {"+": 0, "-": 0}
-
     clean_parts = []
     last_pos = 0
 
-    # We assume pileup indel sequences (AGCTN*) do not contain + or - followed by digits.
-    for match in INDEL_RE.finditer(sequence):
+    for match in PILEUP_RE.finditer(sequence):
         start, end = match.span()
 
-        # Keep the part before the indel
+        # If the match starts before last_pos, it means it's inside a skipped region
+        if start < last_pos:
+            continue
+
+        # Add the valid sequence part before this match
         if start > last_pos:
             clean_parts.append(sequence[last_pos:start])
 
-        # Count the indel
-        indel_type = match.group(1)
-        indel_counts[indel_type] += 1
-
-        # Get length to skip
-        skip_len = int(match.group(2))
-
-        # Advance last_pos over the match AND the skipped sequence
-        last_pos = end + skip_len
+        # Group 1: ^.
+        # Group 2: $
+        # Group 3: Indel ([+-]\d+)
+        if match.group(3):
+            # It's an indel
+            indel_type = match.group(4)
+            indel_len = int(match.group(5))
+            indel_counts[indel_type] += 1
+            # Skip the match and the indel sequence
+            last_pos = end + indel_len
+        else:
+            # It's ^. or $
+            # Just skip the match
+            last_pos = end
 
     # Append remaining part
     if last_pos < len(sequence):

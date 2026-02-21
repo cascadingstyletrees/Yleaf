@@ -40,6 +40,8 @@ class HgMarkersLinker:
     ANCESTRAL: str = "A"
     UNDEFINED: str = "N"
 
+    __slots__ = ("_ancestral_markers", "_derived_markers")
+
     _ancestral_markers: set[str]
     _derived_markers: set[str]
 
@@ -272,9 +274,10 @@ def read_yleaf_out_file(file: Path | str) -> dict[str, HgMarkersLinker]:
     with open(file) as f:
         f.readline()
         for line in f:
-            _, _, marker, haplogroup, _, _, _, _, _, _, state, _ = line.strip().split(
-                "\t"
-            )
+            parts = line.strip().split("\t")
+            marker = parts[2]
+            haplogroup = parts[3]
+            state = parts[10]
             if haplogroup not in haplotype_dict:
                 haplotype_dict[haplogroup] = HgMarkersLinker()
             haplotype_dict[haplogroup].add(marker, state)
