@@ -34,7 +34,10 @@ LOG = logging.getLogger("yleaf_logger")
 
 
 class HgMarkersLinker:
-    """Safe for a certain haplogroup if the number of ancestral and derived markers."""
+    """
+    Safe for a certain haplogroup if the number of ancestral and derived markers.
+    Uses __slots__ for memory optimization as many instances are created.
+    """
 
     DERIVED: str = "D"
     ANCESTRAL: str = "A"
