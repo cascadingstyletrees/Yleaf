@@ -18,7 +18,6 @@ import io
 import logging
 import multiprocessing
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -41,8 +40,6 @@ CACHED_POSITION_DATA: set[str] | None = None
 CACHED_SNP_DATABASE: dict[str, list[dict[str, str]]] | None = None
 CACHED_REFERENCE_FILE: str | None = None
 ACCEPTED_REF_BASES: set[str] = {"A", "C", "G", "T"}
-
-PILEUP_RE = re.compile(r"(\^.)|(\$)|(([+-])(\d+))")
 
 # path constants
 PREDICTION_OUT_FILE_NAME: str = "hg_prediction.hg"
@@ -1360,58 +1357,72 @@ def get_frequency_table(mpileup: list[str]) -> dict[str, list[int]]:
 
 
 def get_frequencies(sequence: str) -> dict[str, int]:
-    sequence = sequence.upper()
+    n = len(sequence)
+    i = 0
 
-    indel_counts = {"+": 0, "-": 0}
-    clean_parts = []
-    last_pos = 0
+    count_A = 0
+    count_T = 0
+    count_G = 0
+    count_C = 0
+    count_del = 0  # for - and *
+    count_ins = 0  # for +
 
-    for match in PILEUP_RE.finditer(sequence):
-        start, end = match.span()
+    while i < n:
+        char = sequence[i]
 
-        # If the match starts before last_pos, it means it's inside a skipped region
-        if start < last_pos:
-            continue
+        if char == "^":
+            i += 2
+        elif char == "$":
+            i += 1
+        elif char == "+" or char == "-":
+            # Indel check: must be followed by digit
+            if i + 1 < n and "0" <= sequence[i + 1] <= "9":
+                is_ins = char == "+"
+                i += 1
 
-        # Add the valid sequence part before this match
-        if start > last_pos:
-            clean_parts.append(sequence[last_pos:start])
+                # Parse digits
+                length = 0
+                while i < n:
+                    c = sequence[i]
+                    if "0" <= c <= "9":
+                        length = length * 10 + (ord(c) - 48)
+                        i += 1
+                    else:
+                        break
 
-        # Group 1: ^.
-        # Group 2: $
-        # Group 3: Indel ([+-]\d+)
-        if match.group(3):
-            # It's an indel
-            indel_type = match.group(4)
-            indel_len = int(match.group(5))
-            indel_counts[indel_type] += 1
-            # Skip the match and the indel sequence
-            last_pos = end + indel_len
+                # Skip sequence
+                i += length
+
+                if is_ins:
+                    count_ins += 1
+                else:
+                    count_del += 1
+            else:
+                # Treat as regular char (ignore)
+                i += 1
+
+        elif char == "*":
+            count_del += 1
+            i += 1
         else:
-            # It's ^. or $
-            # Just skip the match
-            last_pos = end
+            if char == "A" or char == "a":
+                count_A += 1
+            elif char == "T" or char == "t":
+                count_T += 1
+            elif char == "G" or char == "g":
+                count_G += 1
+            elif char == "C" or char == "c":
+                count_C += 1
+            i += 1
 
-    # Append remaining part
-    if last_pos < len(sequence):
-        clean_parts.append(sequence[last_pos:])
-
-    final_seq = "".join(clean_parts)
-
-    # 4. Count bases
-    # We only care about A, T, G, C, *, and we map * to -
-    c = Counter(final_seq)
-
-    result = {
-        "A": c["A"],
-        "T": c["T"],
-        "G": c["G"],
-        "C": c["C"],
-        "-": c["*"] + indel_counts["-"],
-        "+": indel_counts["+"],
+    return {
+        "A": count_A,
+        "T": count_T,
+        "G": count_G,
+        "C": count_C,
+        "-": count_del,
+        "+": count_ins,
     }
-
-    return result
 
 
 def write_info_file(folder: Path, general_info_list: list[str]):
