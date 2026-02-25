@@ -107,56 +107,62 @@ def run_vcf(
     pileupfile["pos"] = pileupfile["pos"].astype(int)
 
     pileupfile["altbase"] = pileupfile["altbase"].str.split(",")
-    pileupfile["reads"] = pileupfile["reads"].str.split(",")
+    # Convert reads to list of integers once
+    pileupfile["reads"] = [
+        [int(i) for i in x] for x in pileupfile["reads"].str.split(",")
+    ]
 
-    pileupfile["ref_reads"] = pileupfile["reads"].apply(lambda x: x[0])
-    pileupfile["alt_reads"] = pileupfile["reads"].apply(lambda x: x[1:])
+    pileupfile["ref_reads"] = [x[0] for x in pileupfile["reads"]]
+    alt_reads = [x[1:] for x in pileupfile["reads"]]
 
-    pileupfile["alt_reads_dict"] = pileupfile.apply(
-        lambda row: dict(zip(row["altbase"], row["alt_reads"])), axis=1
-    )
-    pileupfile["alt_reads_dict"] = pileupfile["alt_reads_dict"].apply(
-        lambda x: {k: int(v) for k, v in x.items()}
-    )
-    pileupfile["highest_alt_reads"] = pileupfile["alt_reads_dict"].apply(
-        lambda x: max(x.values()) if len(x) > 0 else 0
-    )
-    pileupfile["highest_alt_reads_base"] = pileupfile["alt_reads_dict"].apply(
-        lambda x: max(x, key=x.get) if len(x) > 0 else "NA"
-    )
-    pileupfile["total_reads"] = pileupfile.apply(
-        lambda row: int(row["ref_reads"]) + row["highest_alt_reads"], axis=1
-    )
-    pileupfile["called_ref_perc"] = pileupfile.apply(
-        lambda row: round((int(row["ref_reads"]) / row["total_reads"]) * 100, 1)
-        if row["total_reads"] > 0
-        else 0,
-        axis=1,
-    )
-    pileupfile["called_alt_perc"] = pileupfile.apply(
-        lambda row: round((row["highest_alt_reads"] / row["total_reads"]) * 100, 1)
-        if row["total_reads"] > 0
-        else 0,
-        axis=1,
+    # Get highest alt reads and its base using list comprehension
+    # Use key=lambda x: x[0] to ensure we pick the first base in case of ties, matching dict.apply(max)
+    max_alt = [
+        max(zip(r, b), key=lambda x: x[0], default=(0, "NA"))
+        for r, b in zip(alt_reads, pileupfile["altbase"])
+    ]
+    pileupfile["highest_alt_reads"] = [x[0] for x in max_alt]
+    pileupfile["highest_alt_reads_base"] = [x[1] for x in max_alt]
+    # Convert ref_reads to Series of int for vectorized operations
+    pileupfile["ref_reads"] = pd.Series(pileupfile["ref_reads"], dtype=int)
+    pileupfile["total_reads"] = (
+        pileupfile["ref_reads"] + pileupfile["highest_alt_reads"]
     )
 
-    pileupfile["called_base"] = pileupfile.apply(
-        lambda row: row["refbase"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["highest_alt_reads_base"],
-        axis=1,
+    # Vectorized percentage calculation
+    mask = pileupfile["total_reads"] > 0
+    pileupfile["called_ref_perc"] = 0.0
+    pileupfile.loc[mask, "called_ref_perc"] = (
+        (
+            pileupfile.loc[mask, "ref_reads"]
+            / pileupfile.loc[mask, "total_reads"]
+            * 100
+        )
+        .round(1)
+        .astype(float)
     )
-    pileupfile["called_perc"] = pileupfile.apply(
-        lambda row: row["called_ref_perc"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["called_alt_perc"],
-        axis=1,
+
+    pileupfile["called_alt_perc"] = 0.0
+    pileupfile.loc[mask, "called_alt_perc"] = (
+        (
+            pileupfile.loc[mask, "highest_alt_reads"]
+            / pileupfile.loc[mask, "total_reads"]
+            * 100
+        )
+        .round(1)
+        .astype(float)
+    )
+
+    # Vectorized called base, perc and reads
+    ref_is_majority = pileupfile["called_ref_perc"] >= pileupfile["called_alt_perc"]
+    pileupfile["called_base"] = np.where(
+        ref_is_majority, pileupfile["refbase"], pileupfile["highest_alt_reads_base"]
+    )
+    pileupfile["called_perc"] = np.where(
+        ref_is_majority, pileupfile["called_ref_perc"], pileupfile["called_alt_perc"]
     ).astype(float)
-    pileupfile["called_reads"] = pileupfile.apply(
-        lambda row: row["ref_reads"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["highest_alt_reads"],
-        axis=1,
+    pileupfile["called_reads"] = np.where(
+        ref_is_majority, pileupfile["ref_reads"], pileupfile["highest_alt_reads"]
     ).astype(int)
 
     intersect_pos = np.intersect1d(pileupfile["pos"], markerfile["pos"])
@@ -167,19 +173,13 @@ def run_vcf(
     pileupfile = pileupfile.drop(["chr"], axis=1)
     df = pd.merge(markerfile, pileupfile, on="pos")
 
-    df["state"] = df.apply(
-        lambda row: "A"
-        if row["called_base"] == row["anc"]
-        else "D"
-        if row["called_base"] == row["der"]
-        else "NA",
-        axis=1,
-    )
-    df["bool_state"] = df.apply(
-        lambda row: True
-        if (row["called_base"] == row["anc"] or row["called_base"] == row["der"])
-        else False,
-        axis=1,
+    # Vectorized state and bool_state
+    df["state"] = "NA"
+    df.loc[df["called_base"] == df["anc"], "state"] = "A"
+    df.loc[df["called_base"] == df["der"], "state"] = "D"
+
+    df["bool_state"] = (df["called_base"] == df["anc"]) | (
+        df["called_base"] == df["der"]
     )
 
     markerfile_len = len(markerfile)
