@@ -15,6 +15,7 @@ import gzip
 import logging
 import os
 import shutil
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +37,19 @@ def main(choice: str):
         install_genome_files(dir_name)
 
 
+def show_progress(block_num, block_size, total_size):
+    """
+    Callback function for urllib.request.urlretrieve to show download progress.
+    """
+    downloaded = block_num * block_size
+    if total_size > 0:
+        percent = downloaded * 100 / total_size
+        sys.stdout.write(
+            f"\rDownloading: {percent:.1f}% ({downloaded / (1024 * 1024):.1f} MB)"
+        )
+        sys.stdout.flush()
+
+
 def install_genome_files(reference_choice: str):
     LOG.info(f"Starting with preparing {reference_choice}...")
 
@@ -47,12 +61,14 @@ def install_genome_files(reference_choice: str):
     ref_gz_file = Path(str(ref_file) + ".gz")
     try:
         if os.path.getsize(ref_file) < 100 and not ref_gz_file.exists():
-            LOG.debug(f"Downloading the {reference_choice} genome...")
+            LOG.info(f"Downloading the {reference_choice} genome...")
             urllib.request.urlretrieve(
                 f"http://hgdownload.cse.ucsc.edu/goldenPath/{reference_choice}"
                 f"/bigZips/{reference_choice}.fa.gz",
                 ref_gz_file,
+                reporthook=show_progress,
             )
+            print()
         if os.path.getsize(ref_file) < 100:
             LOG.debug("Unpacking the downloaded archive...")
             with gzip.open(ref_gz_file, "rb") as f_in:
