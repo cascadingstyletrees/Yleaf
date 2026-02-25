@@ -94,7 +94,13 @@ def run_vcf(
     sample_vcf_folder = base_out_folder / (sample_vcf_file.name.replace(".vcf.gz", ""))
     safe_create_dir(sample_vcf_folder, args.force)
 
-    cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n", str(sample_vcf_file)]
+    cmd = [
+        "bcftools",
+        "query",
+        "-f",
+        "%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n",
+        str(sample_vcf_file),
+    ]
     # Use subprocess to pipe directly to pandas
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=False)
     pileupfile = pd.read_csv(process.stdout, dtype=str, header=None, sep="\t")
@@ -128,34 +134,44 @@ def run_vcf(
         lambda row: int(row["ref_reads"]) + row["highest_alt_reads"], axis=1
     )
     pileupfile["called_ref_perc"] = pileupfile.apply(
-        lambda row: round((int(row["ref_reads"]) / row["total_reads"]) * 100, 1)
-        if row["total_reads"] > 0
-        else 0,
+        lambda row: (
+            round((int(row["ref_reads"]) / row["total_reads"]) * 100, 1)
+            if row["total_reads"] > 0
+            else 0
+        ),
         axis=1,
     )
     pileupfile["called_alt_perc"] = pileupfile.apply(
-        lambda row: round((row["highest_alt_reads"] / row["total_reads"]) * 100, 1)
-        if row["total_reads"] > 0
-        else 0,
+        lambda row: (
+            round((row["highest_alt_reads"] / row["total_reads"]) * 100, 1)
+            if row["total_reads"] > 0
+            else 0
+        ),
         axis=1,
     )
 
     pileupfile["called_base"] = pileupfile.apply(
-        lambda row: row["refbase"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["highest_alt_reads_base"],
+        lambda row: (
+            row["refbase"]
+            if row["called_ref_perc"] >= row["called_alt_perc"]
+            else row["highest_alt_reads_base"]
+        ),
         axis=1,
     )
     pileupfile["called_perc"] = pileupfile.apply(
-        lambda row: row["called_ref_perc"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["called_alt_perc"],
+        lambda row: (
+            row["called_ref_perc"]
+            if row["called_ref_perc"] >= row["called_alt_perc"]
+            else row["called_alt_perc"]
+        ),
         axis=1,
     ).astype(float)
     pileupfile["called_reads"] = pileupfile.apply(
-        lambda row: row["ref_reads"]
-        if row["called_ref_perc"] >= row["called_alt_perc"]
-        else row["highest_alt_reads"],
+        lambda row: (
+            row["ref_reads"]
+            if row["called_ref_perc"] >= row["called_alt_perc"]
+            else row["highest_alt_reads"]
+        ),
         axis=1,
     ).astype(int)
 
@@ -168,17 +184,21 @@ def run_vcf(
     df = pd.merge(markerfile, pileupfile, on="pos")
 
     df["state"] = df.apply(
-        lambda row: "A"
-        if row["called_base"] == row["anc"]
-        else "D"
-        if row["called_base"] == row["der"]
-        else "NA",
+        lambda row: (
+            "A"
+            if row["called_base"] == row["anc"]
+            else "D"
+            if row["called_base"] == row["der"]
+            else "NA"
+        ),
         axis=1,
     )
     df["bool_state"] = df.apply(
-        lambda row: True
-        if (row["called_base"] == row["anc"] or row["called_base"] == row["der"])
-        else False,
+        lambda row: (
+            True
+            if (row["called_base"] == row["anc"] or row["called_base"] == row["der"])
+            else False
+        ),
         axis=1,
     )
 
@@ -522,9 +542,6 @@ def main():
         main_bam_cram(args, out_folder, False)
     elif args.vcffile:
         main_vcf(args, out_folder)
-    else:
-        LOG.error("Please specify either a bam, a cram, a fastq, or a vcf file")
-        raise ValueError("Please specify either a bam, a cram, a fastq, or a vcf file")
     hg_out = out_folder / PREDICTION_OUT_FILE_NAME
     predict_haplogroup(
         out_folder, hg_out, args.use_old, args.prediction_quality, args.threads
@@ -551,59 +568,51 @@ def logo():
 
 
 def get_arguments() -> argparse.Namespace:
-    parser = ArgumentParser()
+    parser = ArgumentParser(
+        description="Yleaf: software tool for human Y-chromosomal phylogenetic analysis and haplogroup inference"
+    )
 
-    parser.add_argument(
+    # Input Group (Mutually Exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "-fastq",
         "--fastq",
-        required=False,
         help="Use raw FastQ files",
         metavar="PATH",
         type=check_file,
     )
-    parser.add_argument(
+    input_group.add_argument(
         "-bam",
         "--bamfile",
-        required=False,
         help="input BAM file",
         metavar="PATH",
         type=check_file,
     )
-    parser.add_argument(
+    input_group.add_argument(
         "-cram",
         "--cramfile",
-        required=False,
         help="input CRAM file",
         metavar="PATH",
         type=check_file,
     )
-    parser.add_argument(
-        "-cr",
-        "--cram_reference",
-        required=False,
-        help="Reference genome for the CRAM file. Required when using CRAM files.",
-        metavar="PATH",
-        type=check_file,
-    )
-    parser.add_argument(
+    input_group.add_argument(
         "-vcf",
         "--vcffile",
-        required=False,
         help="input VCF file (.vcf.gz)",
         metavar="PATH",
         type=check_file,
     )
-    parser.add_argument(
-        "-ra",
-        "--reanalyze",
-        required=False,
-        help="reanalyze (skip filtering and splitting) the vcf file",
-        action="store_true",
+
+    # General Options
+    general_group = parser.add_argument_group("General Options")
+    general_group.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Folder name containing outputs",
+        metavar="STRING",
     )
-    parser.add_argument(
-        "-force", "--force", action="store_true", help="Delete files without asking"
-    )
-    parser.add_argument(
+    general_group.add_argument(
         "-rg",
         "--reference_genome",
         help="The reference genome build to be used. If no reference is available "
@@ -613,14 +622,30 @@ def get_arguments() -> argparse.Namespace:
         choices=[yleaf_constants.HG19, yleaf_constants.HG38],
         required=True,
     )
-    parser.add_argument(
-        "-o",
-        "--output",
-        required=True,
-        help="Folder name containing outputs",
-        metavar="STRING",
+    general_group.add_argument(
+        "-cr",
+        "--cram_reference",
+        required=False,
+        help="Reference genome for the CRAM file. Required when using CRAM files.",
+        metavar="PATH",
+        type=check_file,
     )
-    parser.add_argument(
+    general_group.add_argument(
+        "-force", "--force", action="store_true", help="Delete files without asking"
+    )
+    general_group.add_argument(
+        "-t",
+        "--threads",
+        dest="threads",
+        help="The number of processes to use when running Yleaf.",
+        type=int,
+        default=1,
+        metavar="INT",
+    )
+
+    # Filtering & Quality
+    filter_group = parser.add_argument_group("Filtering & Quality Options")
+    filter_group.add_argument(
         "-r",
         "--reads_treshold",
         help="The minimum number of reads for each base. (default=10)",
@@ -629,7 +654,7 @@ def get_arguments() -> argparse.Namespace:
         default=10,
         metavar="INT",
     )
-    parser.add_argument(
+    filter_group.add_argument(
         "-q",
         "--quality_thresh",
         help="Minimum quality for each read, integer between 10 and 40. [10-40] (default=20)",
@@ -638,7 +663,7 @@ def get_arguments() -> argparse.Namespace:
         metavar="INT",
         default=20,
     )
-    parser.add_argument(
+    filter_group.add_argument(
         "-b",
         "--base_majority",
         help="The minimum percentage of a base result for acceptance, integer between 50 and 99."
@@ -648,16 +673,7 @@ def get_arguments() -> argparse.Namespace:
         metavar="INT",
         default=90,
     )
-    parser.add_argument(
-        "-t",
-        "--threads",
-        dest="threads",
-        help="The number of processes to use when running Yleaf.",
-        type=int,
-        default=1,
-        metavar="INT",
-    )
-    parser.add_argument(
+    filter_group.add_argument(
         "-pq",
         "--prediction_quality",
         type=float,
@@ -667,8 +683,9 @@ def get_arguments() -> argparse.Namespace:
         help="The minimum quality of the prediction (QC-scores) for it to be accepted. [0-1] (default=0.95)",
     )
 
-    # arguments for prediction
-    parser.add_argument(
+    # Analysis Options
+    analysis_group = parser.add_argument_group("Analysis Options")
+    analysis_group.add_argument(
         "-old",
         "--use_old",
         dest="use_old",
@@ -676,32 +693,13 @@ def get_arguments() -> argparse.Namespace:
         " version only uses the ISOGG tree and slightly different prediction criteria.",
         action="store_true",
     )
-
-    # arguments for drawing haplo group trees
-    parser.add_argument(
-        "-dh",
-        "--draw_haplogroups",
-        help="Draw the predicted haplogroups in the haplogroup tree.",
-        action="store_true",
-    )
-    parser.add_argument(
-        "-hc",
-        "--collapsed_draw_mode",
-        help="Add this flag to compress the haplogroup tree image and remove all uninformative "
-        "haplogroups from it.",
-        action="store_true",
-    )
-
-    # arguments for ancient DNA samples
-    parser.add_argument(
+    analysis_group.add_argument(
         "-aDNA",
         "--ancient_DNA",
         help="Add this flag if the sample is ancient DNA. This will ignore all G > A and C > T mutations.",
         action="store_true",
     )
-
-    # arguments for private mutations
-    parser.add_argument(
+    analysis_group.add_argument(
         "-p",
         "--private_mutations",
         help="Add this flag to search for private mutations. These are variations that are not"
@@ -710,8 +708,7 @@ def get_arguments() -> argparse.Namespace:
         "prediction.",
         action="store_true",
     )
-
-    parser.add_argument(
+    analysis_group.add_argument(
         "-maf",
         "--minor_allele_frequency",
         help="Maximum rate of minor allele for it to be considered"
@@ -719,6 +716,29 @@ def get_arguments() -> argparse.Namespace:
         default=0.01,
         type=float,
         metavar="FLOAT",
+    )
+    analysis_group.add_argument(
+        "-ra",
+        "--reanalyze",
+        required=False,
+        help="reanalyze (skip filtering and splitting) the vcf file",
+        action="store_true",
+    )
+
+    # Visualization
+    viz_group = parser.add_argument_group("Visualization Options")
+    viz_group.add_argument(
+        "-dh",
+        "--draw_haplogroups",
+        help="Draw the predicted haplogroups in the haplogroup tree.",
+        action="store_true",
+    )
+    viz_group.add_argument(
+        "-hc",
+        "--collapsed_draw_mode",
+        help="Add this flag to compress the haplogroup tree image and remove all uninformative "
+        "haplogroups from it.",
+        action="store_true",
     )
 
     args = parser.parse_args()
@@ -757,19 +777,20 @@ def setup_logger(out_folder: Path):
 def safe_create_dir(folder: Path, force: bool):
     """Create the given folder. If the folder is already present delete if the user agrees."""
     if folder.is_dir():
-        while True and not force:
+        if not force:
             LOG.warning(
-                "Folder "
-                + str(folder)
-                + " already exists, would you like to remove it?"
+                f"Folder '{folder}' already exists.\n"
+                "WARNING: This will permanently delete all files in this directory."
             )
-            choice = input("y/n: ")
-            if str(choice).upper() == "Y":
-                break
-            elif str(choice).upper() == "N":
-                sys.exit(0)
-            else:
-                print("Please type y/Y or n/N")
+            while True:
+                choice = input("Do you want to proceed? [y/N]: ").strip().lower()
+                if choice in ["y", "yes"]:
+                    break
+                elif choice in ["n", "no", ""]:
+                    LOG.info("Aborted by user.")
+                    sys.exit(0)
+                else:
+                    print("Please type y/Y or n/N")
         shutil.rmtree(folder)
         os.mkdir(folder)
     else:
@@ -995,7 +1016,9 @@ def chromosome_table(
     )
     stdout, stderr = process.communicate()
     if process.returncode != 0:
-        LOG.error(f"Call: '{' '.join(cmd)}' failed. Reason given: '{stderr.decode('utf-8')}'")
+        LOG.error(
+            f"Call: '{' '.join(cmd)}' failed. Reason given: '{stderr.decode('utf-8')}'"
+        )
         raise SystemExit("Failed command execution")
     LOG.debug(f"Finished running the command {' '.join(cmd)}")
 
