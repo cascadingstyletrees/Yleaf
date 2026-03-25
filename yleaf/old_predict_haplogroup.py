@@ -16,6 +16,7 @@ import collections
 import operator
 import os
 from argparse import ArgumentParser
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -95,6 +96,7 @@ def get_hg_root(hg):
         return init_hg
 
 
+@lru_cache(maxsize=None)
 def get_intermediate_branch(init_hg, path_hg_prediction_tables):
     tmp_init_hg = init_hg + "_int.txt"
     hg_intermediate_file = path_hg_prediction_tables + "/" + tmp_init_hg
