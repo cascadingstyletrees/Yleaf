@@ -15,8 +15,10 @@ import gzip
 import logging
 import os
 import shutil
+import sys
 import urllib.request
 from pathlib import Path
+from time import monotonic
 
 from yleaf import yleaf_constants
 
@@ -36,6 +38,37 @@ def main(choice: str):
         install_genome_files(dir_name)
 
 
+class DownloadProgress:
+    """Report download progress at most once per second, plus completion."""
+
+    def __init__(self):
+        self.last_update = float("-inf")
+        self.last_report = None
+
+    def __call__(self, block_num, block_size, total_size):
+        downloaded = max(0, block_num * block_size)
+        complete = total_size > 0 and downloaded >= total_size
+        if total_size > 0:
+            downloaded = min(downloaded, total_size)
+        report = (downloaded, total_size)
+        now = monotonic()
+        if report == self.last_report:
+            return
+        if not complete and now - self.last_update < 1:
+            return
+        self.last_update = now
+        self.last_report = report
+
+        detail = f"{downloaded / (1024 * 1024):.1f} MiB"
+        if total_size > 0:
+            detail = f"{downloaded * 100 / total_size:.1f}% ({detail})"
+        terminal = sys.stderr.isatty()
+        prefix = "\r" if terminal else ""
+        end = "" if terminal else "\n"
+        sys.stderr.write(f"{prefix}Downloading: {detail}{end}")
+        sys.stderr.flush()
+
+
 def install_genome_files(reference_choice: str):
     LOG.info(f"Starting with preparing {reference_choice}...")
 
@@ -47,12 +80,20 @@ def install_genome_files(reference_choice: str):
     ref_gz_file = Path(str(ref_file) + ".gz")
     try:
         if os.path.getsize(ref_file) < 100 and not ref_gz_file.exists():
-            LOG.debug(f"Downloading the {reference_choice} genome...")
-            urllib.request.urlretrieve(
-                f"http://hgdownload.cse.ucsc.edu/goldenPath/{reference_choice}"
-                f"/bigZips/{reference_choice}.fa.gz",
-                ref_gz_file,
-            )
+            LOG.info(f"Downloading the {reference_choice} genome...")
+            progress = DownloadProgress()
+            try:
+                urllib.request.urlretrieve(
+                    f"http://hgdownload.cse.ucsc.edu/goldenPath/{reference_choice}"
+                    f"/bigZips/{reference_choice}.fa.gz",
+                    ref_gz_file,
+                    reporthook=progress,
+                )
+                downloaded_size = ref_gz_file.stat().st_size
+                progress(1, downloaded_size, downloaded_size)
+            finally:
+                if sys.stderr.isatty():
+                    print(file=sys.stderr)
         if os.path.getsize(ref_file) < 100:
             LOG.debug("Unpacking the downloaded archive...")
             with gzip.open(ref_gz_file, "rb") as f_in:
